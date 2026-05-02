@@ -234,7 +234,7 @@ internal  = set(args.seeds)  # In-scope URLs queue
 bad_scripts = set()
 bad_intel   = set()
 
-supress_regex = False
+suppress_regex = False
 
 # ── Core extraction functions ──────────────────────────────────────────────────
 
@@ -296,8 +296,8 @@ def extractor(url):
         intel_extractor(url, response)
         js_extractor(response)
 
-    if args.regex and not supress_regex:
-        regxy(args.regex, response, supress_regex, custom)
+    if args.regex and not suppress_regex:
+        regxy(args.regex, response, suppress_regex, custom)
 
     if api:
         for match in rentropy.findall(response):
