@@ -268,6 +268,7 @@ def mark_scope(url):
 def record_request_outcome(url, result, purpose):
     """Track redirect and skip metadata before extraction begins."""
     if result.redirected:
+        # Append the final URL so the saved trail shows the full redirect chain.
         trail = ' -> '.join(result.redirect_chain + (result.final_url,))
         redirects.add(f'{url} => {trail}')
         if result.final_url != url:

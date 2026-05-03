@@ -24,6 +24,8 @@ BINARY_EXTENSIONS = frozenset((
 ))
 
 _thread_local = threading.local()
+POOL_CONNECTIONS = 32
+POOL_MAXSIZE = 32
 
 
 class RequestResult(object):
@@ -72,10 +74,15 @@ def get_session():
             redirect=5,
             backoff_factor=0.4,
             status_forcelist=(429, 500, 502, 503, 504),
+            # urllib3>=1.26.0 accepts allowed_methods; see requirements.txt.
             allowed_methods=frozenset(('GET',)),
             raise_on_status=False,
         )
-        adapter = HTTPAdapter(max_retries=retry, pool_connections=32, pool_maxsize=32)
+        adapter = HTTPAdapter(
+            max_retries=retry,
+            pool_connections=POOL_CONNECTIONS,
+            pool_maxsize=POOL_MAXSIZE,
+        )
         session.mount('http://', adapter)
         session.mount('https://', adapter)
         _thread_local.session = session
