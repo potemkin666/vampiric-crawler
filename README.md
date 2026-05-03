@@ -5,9 +5,9 @@ Vampiric Crawler is a Photon-inspired OSINT crawler with a gothic accent: fast e
 ## What it does
 
 - Crawls a target with configurable depth, threads, delay, timeout, headers, cookies, proxies, and user-agent rotation
-- Normalizes URLs so duplicate paths, query ordering, and redirect trails stay predictable
+- Normalizes URLs so duplicate paths, query ordering, redirect trails, and registrable-domain scope checks stay predictable
 - Seeds from robots rules, recursive sitemaps, and archive providers
-- Supports persistent HTTP sessions with retries
+- Supports persistent HTTP sessions with retries, adaptive backoff, robots crawl-delay, checkpoint/resume, and optional JS rendering
 - Collects predictable datasets for tooling and follow-up analysis
 - Exports loot as plain text, JSON, or CSV
 
@@ -43,6 +43,15 @@ pip install -r requirements.txt
 python vampire.py -u https://example.com
 ```
 
+### Web crawler console
+
+```bash
+pip install -r requirements.txt
+python webapp.py
+```
+
+Then open `http://127.0.0.1:8080` for the gothic DOS crawler console. The web UI wraps the existing crawler CLI, streams live crawl output, preserves exports, and writes each run under `webui_runs/`.
+
 ### Launcher scripts
 
 Linux/macOS:
@@ -51,11 +60,25 @@ Linux/macOS:
 ./launch.sh -u https://example.com
 ```
 
+Web UI:
+
+```bash
+./launch-web.sh
+```
+
 Windows:
 
 ```cmd
 launch.bat -u https://example.com
 ```
+
+Web UI:
+
+```cmd
+launch-web.bat
+```
+
+If you double-click the launcher instead of passing flags in a terminal, it will prompt for the target URL first.
 
 ## Usage
 
@@ -73,6 +96,10 @@ python vampire.py -u <URL> [options]
 | `-d`, `--delay` | Delay between requests in seconds | `0` |
 | `--timeout` | Request timeout in seconds | `8` |
 | `--scope {host,domain}` | Exact host only or the whole registered domain | `host` |
+| `--scope-allow REGEX` | Extra regex a URL must match to stay in scope | none |
+| `--scope-deny REGEX` | Regex that forces matching URLs out of scope | none |
+| `--checkpoint FILE` | Save crawl state for later resume | none |
+| `--resume FILE` | Resume from a previous checkpoint | none |
 | `-s`, `--seeds` | Additional seed URLs | none |
 | `--exclude` | Exclude URLs matching a regex | none |
 | `-o`, `--output` | Output directory | target host |
@@ -86,6 +113,9 @@ python vampire.py -u <URL> [options]
 | `--user-agent` | Comma-separated custom user agents |
 | `-H`, `--header`, `--headers` | Repeatable custom header in `Key: Value` format |
 | `-p`, `--proxy` | Comma-separated proxies in `HOST:PORT` form |
+| `--respect-robots-delay` | Honor `Crawl-delay` when a robots rule provides one |
+| `--host-concurrency` | Maximum concurrent requests per host |
+| `--disable-adaptive-backoff` | Disable 429/503 adaptive backoff |
 
 ### Extraction options
 
@@ -95,6 +125,8 @@ python vampire.py -u <URL> [options]
 | `--dns` | Enumerate common subdomains |
 | `--wayback` | Seed from archive providers such as Wayback and Common Crawl |
 | `--only-urls` | Skip non-URL extraction |
+| `--render-js` | Render pages in headless Chromium before extraction |
+| `--render-timeout` | Per-page render timeout in seconds |
 | `-r`, `--regex` | Custom regex for extra extraction |
 
 ### Output options
@@ -139,6 +171,20 @@ python vampire.py \
   --wayback
 ```
 
+## JavaScript rendering
+
+`--render-js` uses Playwright + headless Chromium so SPA-only routes, forms, and fetch targets can be discovered from the rendered DOM and browser network activity.
+
+After installing requirements, install the browser once:
+
+```bash
+python -m playwright install chromium
+```
+
+## Checkpoint / resume
+
+Use `--checkpoint crawl.json` to persist crawler state after seeding, each crawl depth, script scanning, and final completion. Restart the same hunt later with `--resume crawl.json`.
+
 ## Output structure
 
 Example loot directory:
@@ -169,9 +215,9 @@ example.com/
 
 - URLs are canonicalized before being queued, classified, and exported
 - Fuzzable URLs are normalized to stable parameter-key sets
-- Redirects, status handling, and content-type checks happen before extraction
-- Robots rules are parsed by user-agent group, sitemap indexes recurse with loop protection, and archive seeding is bounded
-- Scope is explicit:
+- Redirects, status handling, content-type checks, and optional rendered-DOM extraction happen before analysis
+- Robots rules are parsed by user-agent group, crawl-delay can be honored, sitemap indexes recurse with loop protection, and archive seeding is bounded
+- Scope is explicit and uses registrable-domain parsing rather than a naive two-label split:
   - `host`: stay on the exact host
   - `domain`: allow the full registered domain, including subdomains
 

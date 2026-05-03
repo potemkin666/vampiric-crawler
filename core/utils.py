@@ -7,6 +7,8 @@ import sys
 import threading
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+import tldextract
+
 import core.config
 from core.colors import crypt
 
@@ -54,10 +56,12 @@ _FILE_EXTENSIONS = frozenset((
     'zip', 'tar', 'gz', 'bz2', '7z', 'rar',
     'exe', 'dll', 'so', 'bin',
     'ttf', 'woff', 'woff2', 'eot',
-    'xml', 'json', 'csv', 'txt',
+    'xml', 'json', 'csv', 'txt', 'map',
     'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
     'css',
 ))
+
+_EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 
 
 def is_link(url, processed, files):
@@ -74,7 +78,7 @@ def is_link(url, processed, files):
 
 
 def top_level(url, fix_protocol=False):
-    """Return the registered (eTLD+1) domain of *url*."""
+    """Return the registrable domain (eTLD+1) of *url*."""
     if fix_protocol and not url.startswith('http'):
         url = 'http://' + url
     host = urlsplit(url).hostname or ''
@@ -85,10 +89,10 @@ def top_level(url, fix_protocol=False):
         return host
     except ValueError:
         pass
-    parts = [part for part in host.split('.') if part]
-    if not parts:
-        return ''
-    return '.'.join(parts[-2:]) if len(parts) >= 2 else host
+    extracted = _EXTRACT(host)
+    if extracted.domain and extracted.suffix:
+        return extracted.top_domain_under_public_suffix
+    return host
 
 
 def remove_regex(urls, pattern):
@@ -172,18 +176,33 @@ def normalize_fuzzable_url(url):
     return urlunsplit((parts.scheme, parts.netloc, parts.path, fuzz_query, ''))
 
 
-def is_in_scope(url, host, domain, scope='host'):
+def matches_scope_filters(url, allow_patterns=None, deny_patterns=None):
+    """Return True when *url* passes optional allow/deny regex filters."""
+    deny_patterns = deny_patterns or ()
+    allow_patterns = allow_patterns or ()
+    for pattern in deny_patterns:
+        if pattern.search(url):
+            return False
+    if allow_patterns:
+        return any(pattern.search(url) for pattern in allow_patterns)
+    return True
+
+
+def is_in_scope(url, host, domain, scope='host', allow_patterns=None, deny_patterns=None):
     """Return True if *url* belongs to the configured crawl scope."""
     hostname = (urlsplit(url).hostname or '').lower()
     target_host = (host or '').split(':', 1)[0].lower()
     if not hostname or not target_host:
         return False
+    if not matches_scope_filters(url, allow_patterns, deny_patterns):
+        return False
     if scope == 'host':
         return hostname == target_host
     if scope == 'domain':
-        if hostname == target_host or hostname.endswith('.' + target_host):
+        target_domain = (domain or '').lower()
+        if hostname == target_host:
             return True
-        return top_level(url, fix_protocol=True) == domain
+        return top_level(url, fix_protocol=True) == target_domain
     return False
 
 
@@ -379,9 +398,18 @@ _STAT_KEYS = (
 class CrawlStats(object):
     """Thread-safe crawl counters."""
 
-    def __init__(self):
+    def __init__(self, initial=None):
         self._lock = threading.Lock()
         self._counts = {key: 0 for key in _STAT_KEYS}
+        if initial:
+            for key, value in initial.items():
+                if key in self._counts:
+                    self._counts[key] = int(value)
+
+    @classmethod
+    def from_snapshot(cls, snapshot):
+        """Restore stats from a previous :meth:`snapshot` result."""
+        return cls(initial=snapshot or {})
 
     def bump(self, key, amount=1):
         """Increase *key* by *amount*."""

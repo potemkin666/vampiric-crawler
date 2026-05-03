@@ -15,6 +15,15 @@ _MAX_SITEMAPS = 25
 _MAX_ARCHIVE_INDEXES = 3
 _ARCHIVE_LIMIT = 200
 _DEFAULT_SITEMAPS = ('/sitemap.xml', '/sitemap_index.xml')
+SEED_PROVIDERS = []
+
+
+def register_seed_provider(name):
+    """Register a seed provider that enriches crawler state."""
+    def decorator(func):
+        SEED_PROVIDERS.append((name, func))
+        return func
+    return decorator
 
 
 def _fetch(url, timeout=8, headers=None, proxies=None):
@@ -59,12 +68,14 @@ def _parse_robot_groups(body):
     sitemaps = set()
     current_agents = []
     current_rules = []
+    current_crawl_delay = None
 
     def flush_group():
-        if current_agents or current_rules:
+        if current_agents or current_rules or current_crawl_delay is not None:
             groups.append({
                 'agents': tuple(current_agents),
                 'rules': tuple(current_rules),
+                'crawl_delay': current_crawl_delay,
             })
 
     for raw_line in body.splitlines():
@@ -73,6 +84,7 @@ def _parse_robot_groups(body):
             flush_group()
             current_agents = []
             current_rules = []
+            current_crawl_delay = None
             continue
 
         directive, sep, value = line.partition(':')
@@ -83,14 +95,20 @@ def _parse_robot_groups(body):
         value = value.strip()
 
         if directive == 'user-agent':
-            if current_rules:
+            if current_rules or current_crawl_delay is not None:
                 flush_group()
                 current_agents = []
                 current_rules = []
+                current_crawl_delay = None
             current_agents.append(value.lower())
         elif directive in ('allow', 'disallow'):
             if current_agents:
                 current_rules.append((directive.upper(), value))
+        elif directive == 'crawl-delay' and current_agents:
+            try:
+                current_crawl_delay = max(float(value), 0.0)
+            except ValueError:
+                current_crawl_delay = None
         elif directive == 'sitemap':
             normalized = normalize_url(value)
             if normalized:
@@ -101,7 +119,7 @@ def _parse_robot_groups(body):
 
 
 def _applicable_robot_rules(body):
-    """Return applicable robots paths plus discovered sitemap URLs."""
+    """Return applicable robots rules, sitemap URLs, and crawl-delay seconds."""
     groups, sitemaps = _parse_robot_groups(body)
     matched = []
     best_score = -1
@@ -118,13 +136,16 @@ def _applicable_robot_rules(body):
 
     rules = []
     seen_rules = set()
+    crawl_delay = None
     for group in matched:
+        if group.get('crawl_delay') is not None:
+            crawl_delay = max(crawl_delay or 0.0, group['crawl_delay'])
         for rule in group['rules']:
             if rule not in seen_rules:
                 rules.append(rule)
                 seen_rules.add(rule)
 
-    return rules, sitemaps
+    return rules, sitemaps, crawl_delay
 
 
 def _seedable_robot_path(path):
@@ -144,7 +165,7 @@ def _parse_robots(main_url, internal, headers=None, proxies=None):
         headers=headers,
         proxies=proxies,
     )
-    rules, sitemaps = _applicable_robot_rules(body)
+    rules, sitemaps, crawl_delay = _applicable_robot_rules(body)
     robots = set()
 
     for _, path in rules:
@@ -156,7 +177,7 @@ def _parse_robots(main_url, internal, headers=None, proxies=None):
                 internal.add(seeded)
 
     robots.update(sitemaps)
-    return robots, sitemaps
+    return robots, sitemaps, crawl_delay
 
 
 def _parse_sitemap_body(body, base_url):
@@ -299,11 +320,11 @@ def _archives(domain, host, internal, headers=None, proxies=None):
         _query_commoncrawl(target, internal, headers=headers, proxies=proxies)
 
 
-def zap(main_url, use_wayback, domain, host, internal, robots, proxies,
-        headers=None):
-    """Populate *internal* with seed URLs from robots, sitemaps, and archives."""
+@register_seed_provider('robots')
+def _seed_from_robots(main_url, use_wayback, domain, host, internal, robots, proxies,
+                      headers=None):
     proxy = proxies[0] if proxies else None
-    robot_entries, sitemap_hints = _parse_robots(
+    robot_entries, sitemap_hints, crawl_delay = _parse_robots(
         main_url,
         internal,
         headers=headers,
@@ -317,5 +338,25 @@ def zap(main_url, use_wayback, domain, host, internal, robots, proxies,
         headers=headers,
         proxies=proxy,
     )
+    return {
+        'crawl_delay': crawl_delay,
+    }
+
+
+@register_seed_provider('archives')
+def _seed_from_archives(main_url, use_wayback, domain, host, internal, robots, proxies,
+                        headers=None):
     if use_wayback:
+        proxy = proxies[0] if proxies else None
         _archives(domain, host, internal, headers=headers, proxies=proxy)
+    return {}
+
+
+def zap(main_url, use_wayback, domain, host, internal, robots, proxies,
+        headers=None):
+    """Populate *internal* with seed URLs from registered providers."""
+    metadata = {}
+    for _, provider in SEED_PROVIDERS:
+        result = provider(main_url, use_wayback, domain, host, internal, robots, proxies, headers=headers) or {}
+        metadata.update({key: value for key, value in result.items() if value is not None})
+    return metadata
