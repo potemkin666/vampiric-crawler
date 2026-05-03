@@ -4,18 +4,22 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from core import zap
+from core import render, zap
+from core.checkpoint import load_checkpoint, normalize_checkpoint_sets, save_checkpoint
+from core.politeness import PolitenessController
 from core.utils import (
     extract_headers,
     is_in_scope,
     normalize_fuzzable_url,
     normalize_url,
+    top_level,
 )
 from plugins.exporter import exporter
 
@@ -55,6 +59,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 '<a href="/dup?b=2&a=1">dup-a</a>'
                 '<a href="/dup?a=1&b=2#frag">dup-b</a>'
                 '<a href="./dup/?a=9&b=8">dup-c</a>'
+                '<a href="/appdata">appdata</a>'
                 '<a href="https://discord.gg/nightshift">discord</a>'
                 '<script src="/script.js"></script>'
                 '<form action="/submit" method="post">'
@@ -71,6 +76,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 '<a href="/flaky">flaky</a></body></html>'
             )
             self._send(200, body)
+        elif self.path == '/appdata':
+            body = (
+                '<html><body>'
+                '<script type="application/json">'
+                '{"api":"/api/discovered","graphql":"/graphql","swagger":"/openapi.json","manifest":"/manifest.json"}'
+                '</script>'
+                '</body></html>'
+            )
+            self._send(200, body)
         elif self.path.startswith('/dup'):
             self._send(200, '<html><body>duplicate</body></html>')
         elif self.path == '/landing':
@@ -80,7 +94,23 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif self.path == '/binary':
             self._send(200, '%PDF-1.4', content_type='application/pdf')
         elif self.path == '/script.js':
-            self._send(200, 'const api="/api/crypt";', content_type='application/javascript')
+            self._send(
+                200,
+                'const api="/api/crypt"; fetch("/graphql"); //# sourceMappingURL=/script.js.map',
+                content_type='application/javascript',
+            )
+        elif self.path == '/script.js.map':
+            self._send(200, '{"version":3}', content_type='application/json')
+        elif self.path == '/api/discovered':
+            self._send(200, '<html><body>api</body></html>', content_type='application/json')
+        elif self.path == '/api/crypt':
+            self._send(200, '{"ok":true}', content_type='application/json')
+        elif self.path == '/graphql':
+            self._send(200, '{"data":{}}', content_type='application/json')
+        elif self.path == '/openapi.json':
+            self._send(200, '{"openapi":"3.1.0"}', content_type='application/json')
+        elif self.path == '/manifest.json':
+            self._send(200, '{"name":"fixture"}', content_type='application/json')
         elif self.path == '/submit':
             self._send(200, '<html><body>submitted</body></html>')
         elif self.path == '/hidden':
@@ -103,6 +133,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 'Allow: /page\n'
                 'Allow: /flaky\n'
                 'Disallow: /hidden\n'
+                'Crawl-delay: 1\n'
                 'Sitemap: {}/sitemap.xml\n'.format(base_url)
             )
             self._send(200, body, content_type='text/plain')
@@ -140,6 +171,43 @@ class FixtureHandler(BaseHTTPRequestHandler):
         return
 
 
+class FakePage(object):
+    def __init__(self):
+        self._callbacks = {}
+
+    def on(self, name, callback):
+        self._callbacks[name] = callback
+        callback(type('Response', (), {'url': 'https://example.com/graphql'})())
+
+    def goto(self, url, wait_until='networkidle', timeout=0):
+        return None
+
+    def content(self):
+        return '<html><body><a href="https://example.com/rendered-only">rendered</a></body></html>'
+
+    def eval_on_selector_all(self, selector, script):
+        return ['https://example.com/rendered-only']
+
+
+class FakeContext(object):
+    def __init__(self):
+        self.cookies = []
+
+    def add_cookies(self, cookies):
+        self.cookies.extend(cookies)
+
+    def new_page(self):
+        return FakePage()
+
+    def close(self):
+        return None
+
+
+class FakeBrowser(object):
+    def new_context(self, **kwargs):
+        return FakeContext()
+
+
 class RegressionTests(unittest.TestCase):
     def _write_test_launcher(self, tmpdir):
         launcher_path = os.path.join(tmpdir, 'launch.sh')
@@ -174,8 +242,9 @@ class RegressionTests(unittest.TestCase):
             normalize_fuzzable_url('https://example.com/dup?b=2&a=1&a=9'),
             'https://example.com/dup?a=&b=',
         )
-        self.assertTrue(is_in_scope('https://api.example.com/path', 'www.example.com', 'example.com', 'domain'))
-        self.assertFalse(is_in_scope('https://api.example.com/path', 'www.example.com', 'example.com', 'host'))
+        self.assertEqual(top_level('https://api.example.co.uk/path'), 'example.co.uk')
+        self.assertTrue(is_in_scope('https://api.example.co.uk/path', 'www.example.co.uk', 'example.co.uk', 'domain'))
+        self.assertFalse(is_in_scope('https://api.example.co.uk/path', 'www.example.co.uk', 'example.co.uk', 'host'))
 
     def test_extract_headers_requires_key_value_format(self):
         self.assertEqual(
@@ -226,6 +295,41 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('https://app.example.com/gamma', internal)
         self.assertIn('https://example.com/root', internal)
         self.assertIn('https://cdn.example.com/file', internal)
+
+    def test_robots_rules_return_crawl_delay(self):
+        body = 'User-agent: *\nDisallow: /hidden\nCrawl-delay: 3\nSitemap: https://example.com/sitemap.xml\n'
+        rules, sitemaps, crawl_delay = zap._applicable_robot_rules(body)
+        self.assertEqual(rules, [('DISALLOW', '/hidden')])
+        self.assertEqual(sitemaps, {'https://example.com/sitemap.xml'})
+        self.assertEqual(crawl_delay, 3.0)
+
+    def test_checkpoint_round_trip_restores_sets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = os.path.join(tmpdir, 'crawl.json')
+            save_checkpoint(checkpoint, {
+                'main_url': 'https://example.com',
+                'stats': {'requests': 2, 'visited': 1},
+                'internal': ['https://example.com'],
+                'bad_intel': [[['secret', 'value'], 'TOKEN', 'https://example.com']],
+            })
+            restored = load_checkpoint(checkpoint)
+            sets = normalize_checkpoint_sets(restored)
+            self.assertEqual(restored['main_url'], 'https://example.com')
+            self.assertIn('https://example.com', sets['internal'])
+            self.assertIn((('secret', 'value'), 'TOKEN', 'https://example.com'), sets['bad_intel'])
+
+    def test_render_page_collects_dom_and_network_urls(self):
+        with patch('core.render._get_browser', return_value=FakeBrowser()):
+            rendered = render.render_page('https://example.com', cookie='session=abc')
+        self.assertIn('rendered-only', rendered.html)
+        self.assertIn('https://example.com/rendered-only', rendered.urls)
+        self.assertIn('https://example.com/graphql', rendered.urls)
+
+    def test_politeness_controller_records_retry_after_backoff(self):
+        controller = PolitenessController(base_delay=0, host_concurrency=1)
+        controller.record_response('https://example.com', 429, {'Retry-After': '2'})
+        state = controller._host_state('example.com')
+        self.assertGreaterEqual(state['next_allowed'], time.time() + 1.5)
 
     def test_launch_script_prompts_for_url_when_started_without_args(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -296,10 +400,7 @@ class RegressionTests(unittest.TestCase):
 
             with open(env['TEST_LOG'], 'r', encoding='utf-8') as handle:
                 recorded_args = handle.read().splitlines()
-            self.assertEqual(
-                recorded_args,
-                [app_path, '-u', 'https://example.com/path'],
-            )
+            self.assertEqual(recorded_args, [app_path, '-u', 'https://example.com/path'])
 
     def test_launch_script_rejects_empty_prompt_input(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -368,6 +469,8 @@ class RegressionTests(unittest.TestCase):
                     '-l', '2',
                     '-t', '2',
                     '--timeout', '2',
+                    '--respect-robots-delay',
+                    '--host-concurrency', '1',
                     '-o', output_dir,
                     '-e', 'json',
                     '--stdout', 'stats',
@@ -403,6 +506,8 @@ class RegressionTests(unittest.TestCase):
                 self.assertIn('/sitemap-only', internal)
                 self.assertIn('/sitemap-deep', internal)
                 self.assertNotIn('/other-only', internal)
+                self.assertIn('/openapi.json', internal)
+                self.assertIn('/manifest.json', internal)
 
                 with open(os.path.join(output_dir, 'skipped.txt'), 'r', encoding='utf-8') as handle:
                     skipped = handle.read()
@@ -431,6 +536,17 @@ class RegressionTests(unittest.TestCase):
                 self.assertIn('EMAIL:test@example.com', intel)
                 self.assertIn('discord.gg/nightshift', intel)
 
+                with open(os.path.join(output_dir, 'endpoints.txt'), 'r', encoding='utf-8') as handle:
+                    endpoints = handle.read()
+                self.assertIn('/api/crypt', endpoints)
+                self.assertIn('/graphql', endpoints)
+
+                with open(os.path.join(output_dir, 'files.txt'), 'r', encoding='utf-8') as handle:
+                    files = handle.read()
+                self.assertIn('/script.js.map', files)
+                self.assertIn('/openapi.json', files)
+                self.assertIn('/manifest.json', files)
+
                 with open(os.path.join(output_dir, 'stats.txt'), 'r', encoding='utf-8') as handle:
                     stats_file = handle.read()
                 self.assertIn('redirects=', stats_file)
@@ -447,6 +563,65 @@ class RegressionTests(unittest.TestCase):
 
                 self.assertIn('redirects=', result.stdout)
                 self.assertIn('visited=', result.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_cli_can_resume_from_checkpoint(self):
+        FixtureHandler.header_failures = []
+        FixtureHandler.flaky_hits = 0
+
+        server = ThreadedHTTPServer(('127.0.0.1', 0), FixtureHandler)
+        server.base_url = 'http://127.0.0.1:{}'.format(server.server_port)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                checkpoint = os.path.join(tmpdir, 'crawl.json')
+                output_dir = os.path.join(tmpdir, 'loot')
+                seed_only = subprocess.run(
+                    [
+                        sys.executable,
+                        os.path.join(REPO_ROOT, 'vampire.py'),
+                        '-u', server.base_url,
+                        '-l', '0',
+                        '--checkpoint', checkpoint,
+                        '-H', 'X-Blood: moon',
+                    ],
+                    cwd=REPO_ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(seed_only.returncode, 0, msg=seed_only.stderr)
+                state = load_checkpoint(checkpoint)
+                self.assertEqual(state['stage'], 'complete')
+                self.assertIn(server.base_url + '/', state['internal'])
+
+                resumed = subprocess.run(
+                    [
+                        sys.executable,
+                        os.path.join(REPO_ROOT, 'vampire.py'),
+                        '--resume', checkpoint,
+                        '-l', '2',
+                        '-o', output_dir,
+                        '-H', 'X-Blood: moon',
+                    ],
+                    cwd=REPO_ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(resumed.returncode, 0, msg=resumed.stderr)
+                with open(os.path.join(output_dir, 'internal.txt'), 'r', encoding='utf-8') as handle:
+                    internal = handle.read()
+                self.assertIn('/page', internal)
+                self.assertIn('/sitemap-only', internal)
         finally:
             server.shutdown()
             server.server_close()

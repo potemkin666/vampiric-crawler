@@ -1,0 +1,4 @@
+/flaky
+/hidden
+/page
+http://127.0.0.1:36181/sitemap.xml

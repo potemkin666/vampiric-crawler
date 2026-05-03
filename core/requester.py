@@ -1,10 +1,10 @@
 """HTTP requester for Vampiric Crawler."""
 import random
-import time
 import threading
+import time
+import warnings
 
 import requests
-import warnings
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -33,7 +33,7 @@ class RequestResult(object):
 
     def __init__(self, url, final_url=None, text='', status_code=None,
                  content_type='', error=None, redirect_chain=None,
-                 skip_reason=None):
+                 skip_reason=None, headers=None):
         self.url = url
         self.final_url = final_url or url
         self.text = text or ''
@@ -42,6 +42,7 @@ class RequestResult(object):
         self.error = error
         self.redirect_chain = tuple(redirect_chain or ())
         self.skip_reason = skip_reason
+        self.headers = dict(headers or {})
 
     @property
     def ok(self):
@@ -74,7 +75,6 @@ def get_session():
             redirect=5,
             backoff_factor=0.4,
             status_forcelist=(429, 500, 502, 503, 504),
-            # urllib3>=1.26.0 accepts allowed_methods; see requirements.txt.
             allowed_methods=frozenset(('GET',)),
             raise_on_status=False,
         )
@@ -90,7 +90,7 @@ def get_session():
 
 
 def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
-              user_agents, failed, processed, stats=None):
+              user_agents, failed, processed, stats=None, policy=None):
     """Fetch *url* and return a normalized :class:`RequestResult`."""
     processed.add(url)
 
@@ -100,7 +100,11 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
             stats.bump('binary_skips')
         return RequestResult(url, skip_reason='binary-extension')
 
-    time.sleep(delay)
+    host_token = None
+    if policy is not None:
+        host_token = policy.acquire(url)
+    else:
+        time.sleep(delay)
 
     try:
         proxy = random.choice(proxies)
@@ -133,6 +137,9 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
         content_type = normalize_content_type(resp.headers.get('Content-Type', ''))
         redirect_chain = tuple(hop.url for hop in resp.history)
 
+        if policy is not None:
+            policy.record_response(url, status_code=status_code, headers=resp.headers)
+
         if redirect_chain and stats:
             stats.bump('redirects', len(redirect_chain))
 
@@ -150,6 +157,7 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 content_type=content_type,
                 redirect_chain=redirect_chain,
                 error='client-error',
+                headers=resp.headers,
             )
 
         if status_code >= 500:
@@ -166,6 +174,7 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 content_type=content_type,
                 redirect_chain=redirect_chain,
                 error='server-error',
+                headers=resp.headers,
             )
 
         if stats:
@@ -185,6 +194,7 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 content_type=content_type,
                 redirect_chain=redirect_chain,
                 skip_reason=skip_reason,
+                headers=resp.headers,
             )
 
         text = resp.text
@@ -199,6 +209,7 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 content_type=content_type,
                 redirect_chain=redirect_chain,
                 skip_reason='empty-response',
+                headers=resp.headers,
             )
 
         if core.config.verbose:
@@ -217,6 +228,7 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
             status_code=status_code,
             content_type=content_type,
             redirect_chain=redirect_chain,
+            headers=resp.headers,
         )
 
     except Exception as exc:
@@ -226,3 +238,6 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
         if core.config.verbose:
             print(f'{coffin}Failed to feed on {url} — {exc}')
         return RequestResult(url, error=str(exc))
+    finally:
+        if policy is not None and host_token is not None:
+            policy.release(host_token)

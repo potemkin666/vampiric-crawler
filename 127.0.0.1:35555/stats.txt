@@ -1,0 +1,12 @@
+binary_skips=0
+client_errors=0
+empty_responses=0
+failures=0
+markup_pages=0
+redirects=0
+requests=0
+script_pages=0
+server_errors=0
+skipped=0
+successes=0
+visited=0
