@@ -1,8 +1,11 @@
 """Utility helpers for Vampiric Crawler."""
+import ipaddress
 import math
+import posixpath
 import re
 import sys
 import threading
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import core.config
 from core.colors import crypt
@@ -72,10 +75,16 @@ def is_link(url, processed, files):
 
 def top_level(url, fix_protocol=False):
     """Return the registered (eTLD+1) domain of *url*."""
-    from urllib.parse import urlparse
     if fix_protocol and not url.startswith('http'):
         url = 'http://' + url
-    host = urlparse(url).netloc
+    host = urlsplit(url).hostname or ''
+    if not host:
+        return ''
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
     parts = host.split('.')
     return '.'.join(parts[-2:]) if len(parts) >= 2 else host
 
@@ -95,6 +104,85 @@ def remove_file(url):
         if replaceable and replaceable.group() != '/':
             return url.replace(replaceable.group(), '')
     return url
+
+
+def normalize_query_string(query):
+    """Return a stable query string with sorted key/value pairs."""
+    if not query:
+        return ''
+    pairs = parse_qsl(query, keep_blank_values=True)
+    pairs.sort(key=lambda item: (item[0], item[1]))
+    return urlencode(pairs, doseq=True)
+
+
+def normalize_url(url, base_url=None, keep_query=True):
+    """Return a canonical HTTP(S) URL with stable host/path/query formatting."""
+    if not url:
+        return ''
+    candidate = url.strip()
+    if not candidate:
+        return ''
+    if base_url:
+        candidate = urljoin(base_url, candidate)
+    elif candidate.startswith('//'):
+        candidate = 'http:' + candidate
+
+    parts = urlsplit(candidate)
+    if parts.scheme and parts.scheme not in ('http', 'https'):
+        return candidate
+
+    scheme = (parts.scheme or '').lower()
+    hostname = (parts.hostname or '').lower()
+    if scheme in ('http', 'https') and not hostname:
+        return ''
+
+    port = parts.port
+    netloc = hostname
+    if port and not ((scheme == 'http' and port == 80) or
+                     (scheme == 'https' and port == 443)):
+        netloc = f'{hostname}:{port}'
+
+    path = parts.path or '/'
+    if not path.startswith('/'):
+        path = '/' + path
+    path = re.sub(r'/+', '/', path)
+    path = posixpath.normpath(path)
+    if not path.startswith('/'):
+        path = '/' + path
+    if path != '/':
+        path = path.rstrip('/')
+
+    query = normalize_query_string(parts.query) if keep_query else ''
+    return urlunsplit((scheme, netloc, path, query, ''))
+
+
+def normalize_fuzzable_url(url):
+    """Return a canonical fuzzable URL with sorted unique parameter keys."""
+    normalized = normalize_url(url)
+    if not normalized:
+        return ''
+    parts = urlsplit(normalized)
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if not pairs:
+        return ''
+    keys = sorted({key for key, _ in pairs})
+    fuzz_query = urlencode([(key, '') for key in keys], doseq=True)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, fuzz_query, ''))
+
+
+def is_in_scope(url, host, domain, scope='host'):
+    """Return True if *url* belongs to the configured crawl scope."""
+    hostname = (urlsplit(url).hostname or '').lower()
+    target_host = (host or '').split(':', 1)[0].lower()
+    if not hostname or not target_host:
+        return False
+    if scope == 'host':
+        return hostname == target_host
+    if scope == 'domain':
+        if hostname == target_host or hostname.endswith('.' + target_host):
+            return True
+        return top_level(url, fix_protocol=True) == domain
+    return False
 
 
 # ---------------------------------------------------------------------------

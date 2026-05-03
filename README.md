@@ -1,205 +1,218 @@
 # 🦇 Vampiric Crawler
 
-> *"The night yields no secrets to those who do not hunt."*
+Vampiric Crawler is a Photon-inspired OSINT crawler with a gothic accent: fast enough for reconnaissance, readable enough for operators, and theatrical only where it helps.
 
-A **gothic-themed OSINT web crawler** inspired by [Photon](https://github.com/s0md3v/Photon).  
-Built to run from anywhere — including an **external hard drive** — with a single command.
+## What it does
 
----
+- Crawls a target with configurable depth, threads, delay, timeout, headers, cookies, proxies, and user-agent rotation
+- Normalizes URLs so duplicate paths, query ordering, and redirect trails stay predictable
+- Supports persistent HTTP sessions with retries
+- Collects predictable datasets for tooling and follow-up analysis
+- Exports loot as plain text, JSON, or CSV
 
-## ✦ Features
+## Datasets
 
-| Feature | Description |
+The crawler writes one text file per populated dataset and can also export the same structure as JSON or CSV.
+
+| Dataset | Description |
 |---|---|
-| 🕸️ **Multi-threaded crawling** | Configurable fangs (threads) for fast, deep hunts |
-| 📧 **Intel extraction** | Emails, phone numbers, social accounts, cloud buckets |
-| 🔑 **Secret key detection** | High-entropy strings: API keys, auth tokens |
-| 📄 **File harvesting** | PDFs, images, archives and other assets |
-| ⚡ **JS endpoint scanning** | Extracts API paths from JavaScript files |
-| 🔗 **Fuzzable URL collection** | URLs with query parameters, ready for testing |
-| 🌐 **Subdomain enumeration** | Common subdomain bruteforce via `--dns` |
-| 📜 **Wayback Machine seeds** | Pull archived URLs as extra crawl seeds |
-| 🗂️ **Export** | Save loot as JSON or CSV in addition to plain text |
-| 🎭 **Custom regex** | Extract anything you want with `-r <pattern>` |
-| 🛡️ **Proxy support** | Route traffic through one or more proxies |
-| 🔄 **User-agent rotation** | Blend into the night with random user agents |
+| `internal` | In-scope URLs |
+| `external` | Out-of-scope URLs |
+| `fuzzable` | Canonicalized URLs with query parameters |
+| `intel` | OSINT findings such as emails, phones, cloud buckets, social profiles, and invite links |
+| `keys` | High-value secrets and fallback high-entropy tokens |
+| `forms` | HTML forms with action, method, and discovered inputs |
+| `files` | Static assets that were linked but not crawled as pages |
+| `scripts` | JavaScript files in scope |
+| `endpoints` | Paths extracted from JavaScript |
+| `robots` | `robots.txt` entries |
+| `custom` | Matches from `-r/--regex` |
+| `failed` | Requests that failed |
+| `skipped` | Responses skipped before extraction |
+| `redirects` | Redirect chains followed during crawling |
+| `stats` | Crawl counters and telemetry |
+| `subdomains` | DNS discoveries from `--dns` |
 
----
+## Installation
 
-## 🚀 Quick Start
+### Direct Python
 
-### Prerequisites
-- **Python 3.6+** (the only requirement)
-- Internet access
-
-### From an External Hard Drive (or any directory)
-
-**Linux / macOS:**
-```bash
-# Navigate to the drive
-cd /media/yourname/VampireDrive/vampiric-crawler
-
-# One-shot launch (installs deps automatically)
-./launch.sh -u https://example.com
-```
-
-**Windows:**
-```cmd
-:: Navigate to the drive
-cd E:\vampiric-crawler
-
-:: Double-click launch.bat or run:
-launch.bat -u https://example.com
-```
-
-**Direct Python:**
 ```bash
 pip install -r requirements.txt
 python vampire.py -u https://example.com
 ```
 
----
+### Launcher scripts
 
-## 🦇 Usage
+Linux/macOS:
 
+```bash
+./launch.sh -u https://example.com
 ```
+
+Windows:
+
+```cmd
+launch.bat -u https://example.com
+```
+
+## Usage
+
+```bash
 python vampire.py -u <URL> [options]
 ```
 
-### Essential Options
+### Core options
 
 | Flag | Description | Default |
 |---|---|---|
-| `-u URL` | Target URL (the prey) | *required* |
-| `-l N` | Crawl depth | `2` |
-| `-t N` | Threads (fangs) | `4` |
-| `-d N` | Delay between requests (seconds) | `0` |
-| `--timeout N` | HTTP timeout (seconds) | `8` |
-| `-o DIR` | Output directory | `<hostname>` |
-| `-v` | Verbose (show every drop) | off |
+| `-u`, `--url` | Target URL | required |
+| `-l`, `--level` | Crawl depth | `2` |
+| `-t`, `--threads` | Worker threads | `4` |
+| `-d`, `--delay` | Delay between requests in seconds | `0` |
+| `--timeout` | Request timeout in seconds | `8` |
+| `--scope {host,domain}` | Exact host only or the whole registered domain | `host` |
+| `-s`, `--seeds` | Additional seed URLs | none |
+| `--exclude` | Exclude URLs matching a regex | none |
+| `-o`, `--output` | Output directory | target host |
+| `-v`, `--verbose` | Verbose crawl output | off |
 
-### Extraction Options
-
-| Flag | Description |
-|---|---|
-| `--keys` | Extract high-entropy strings (API keys, tokens) |
-| `--dns` | Enumerate subdomains |
-| `--wayback` | Seed from Wayback Machine archive |
-| `--only-urls` | Skip intel extraction, harvest URLs only |
-| `-r PATTERN` | Extract strings matching custom regex |
-| `--exclude PATTERN` | Skip URLs matching this regex |
-
-### Network Options
+### Request and network options
 
 | Flag | Description |
 |---|---|
-| `-c COOKIE` | Cookie header value |
-| `--user-agent UA` | Custom user agent(s), comma-separated |
-| `-H "Key: Value"` | Add a custom header (repeatable) |
-| `-p HOST:PORT` | Proxy or proxies (comma-separated) |
+| `-c`, `--cookie` | Cookie header value |
+| `--user-agent` | Comma-separated custom user agents |
+| `-H`, `--header`, `--headers` | Repeatable custom header in `Key: Value` format |
+| `-p`, `--proxy` | Comma-separated proxies in `HOST:PORT` form |
 
-### Output Options
+### Extraction options
 
 | Flag | Description |
 |---|---|
-| `-e json\|csv` | Export results as JSON or CSV |
-| `--stdout DATASET` | Print a dataset to stdout (`internal`, `intel`, `keys`, …) |
+| `--keys` | Enable secret detection |
+| `--dns` | Enumerate common subdomains |
+| `--wayback` | Seed from the Wayback Machine |
+| `--only-urls` | Skip non-URL extraction |
+| `-r`, `--regex` | Custom regex for extra extraction |
 
----
+### Output options
 
-## 📖 Examples
+| Flag | Description |
+|---|---|
+| `--stdout DATASET` | Print one dataset to stdout |
+| `-e`, `--export {json,csv}` | Export results in addition to text files |
+
+## Examples
+
+Basic crawl:
 
 ```bash
-# Basic hunt
 python vampire.py -u https://example.com
+```
 
-# Deep hunt with 8 threads, verbose output
-python vampire.py -u https://example.com -l 3 -t 8 -v
+Domain-wide crawl with retries, custom headers, and JSON export:
 
-# Extract secret keys + export as JSON
-python vampire.py -u https://example.com --keys -e json
+```bash
+python vampire.py \
+  -u https://app.example.com \
+  --scope domain \
+  -H "Authorization: Bearer <token>" \
+  -H "X-Night: eternal" \
+  --keys \
+  -e json
+```
 
-# Seed from Wayback Machine + enumerate subdomains
-python vampire.py -u https://example.com --wayback --dns
+Print canonical fuzzables only:
 
-# Use a proxy and a custom cookie
-python vampire.py -u https://example.com -p 127.0.0.1:8080 -c "session=abc123"
-
-# Send custom headers with every nocturnal request
-python vampire.py -u https://example.com -H "Authorization: Bearer token" -H "X-Night: eternal"
-
-# Only collect URLs with parameters (fuzzable), pipe to another tool
+```bash
 python vampire.py -u https://example.com --only-urls --stdout fuzzable
-
-# Find all email addresses
-python vampire.py -u https://example.com --stdout intel | grep EMAIL
 ```
 
----
+Use proxies and archived seeds:
 
-## 🗂️ Output
-
-Results are saved in a directory named after the target host (or the path you specify with `-o`):
-
+```bash
+python vampire.py \
+  -u https://example.com \
+  -p 127.0.0.1:8080,127.0.0.1:8081 \
+  --wayback
 ```
+
+## Output structure
+
+Example loot directory:
+
+```text
 example.com/
-├── internal.txt    # In-scope URLs
-├── external.txt    # Out-of-scope URLs
-├── fuzzable.txt    # URLs with query parameters
-├── files.txt       # Static assets
-├── scripts.txt     # JavaScript files
-├── endpoints.txt   # JS-extracted API paths
-├── intel.txt       # Emails, accounts, buckets
-├── keys.txt        # Potential API/auth keys
-├── robots.txt      # robots.txt entries
-├── custom.txt      # Custom regex matches
-├── failed.txt      # URLs that could not be fetched
-├── skipped.txt     # Responses skipped before extraction
-├── redirects.txt   # Redirect trails followed during the crawl
-├── stats.txt       # Crawl counters and telemetry
-├── subdomains.txt  # (--dns only)
-├── results.json    # (-e json only)
-└── results.csv     # (-e csv only)
+├── custom.txt
+├── endpoints.txt
+├── external.txt
+├── failed.txt
+├── files.txt
+├── forms.txt
+├── fuzzable.txt
+├── intel.txt
+├── internal.txt
+├── keys.txt
+├── redirects.txt
+├── results.csv
+├── results.json
+├── robots.txt
+├── scripts.txt
+├── skipped.txt
+├── stats.txt
+└── subdomains.txt
 ```
 
----
+## Notes on behavior
 
-## 🏗️ Architecture
+- URLs are canonicalized before being queued, classified, and exported
+- Fuzzable URLs are normalized to stable parameter-key sets
+- Redirects, status handling, and content-type checks happen before extraction
+- Scope is explicit:
+  - `host`: stay on the exact host
+  - `domain`: allow the full registered domain, including subdomains
 
-```
+## Current secret coverage
+
+With `--keys`, the crawler looks for patterns such as:
+
+- AWS access key IDs
+- GitHub tokens
+- Slack tokens
+- Stripe live secrets
+- Google API keys
+- JWTs
+- Private key blocks
+- Fallback high-entropy tokens
+
+## Current intel coverage
+
+The crawler extracts or records findings such as:
+
+- Emails
+- Phone numbers
+- IP addresses
+- Credit cards and SSNs
+- Bitcoin addresses
+- AWS / GCP / Azure storage references
+- GitHub, LinkedIn, Facebook, Instagram, Reddit, Twitter, YouTube
+- Discord invites, Telegram handles, Pastebin links
+
+## Project layout
+
+```text
 vampiric-crawler/
-├── vampire.py          ← main entry point
-├── launch.sh           ← one-click launcher (Linux/macOS)
-├── launch.bat          ← one-click launcher (Windows)
-├── requirements.txt    ← Python dependencies
+├── vampire.py
+├── launch.sh
+├── launch.bat
+├── requirements.txt
 ├── core/
-│   ├── colors.py       ← terminal colour codes
-│   ├── config.py       ← global settings & intel domain list
-│   ├── flash.py        ← thread-pool executor
-│   ├── regex.py        ← all compiled regex patterns
-│   ├── requester.py    ← HTTP fetcher
-│   ├── utils.py        ← utility functions
-│   ├── user-agents.txt ← user-agent pool
-│   └── zap.py          ← seed harvester (robots/sitemap/wayback)
 └── plugins/
-    └── exporter.py     ← JSON / CSV exporter
 ```
 
----
+## License
 
-## 💡 Tips for External Hard Drive Use
+GPL v3.0. Hunt responsibly.
 
-1. **No installation needed** — `launch.sh` / `launch.bat` auto-installs Python deps.
-2. **Set `-o /path/on/drive`** to save loot directly on the external drive.
-3. Use `--timeout 12` on slow network connections.
-4. On Windows: run as Administrator if the drive is NTFS to avoid permission issues.
-
----
-
-## ⚖️ License
-
-GPL v3.0 — Hunt responsibly. Only use on targets you have permission to crawl.
-
----
-
-*Inspired by [Photon](https://github.com/s0md3v/Photon) by s0md3v.*
+Inspired by Photon, but dressed for the crypt.

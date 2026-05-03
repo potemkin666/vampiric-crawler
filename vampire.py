@@ -35,20 +35,8 @@ from core.colors import (
 
 # ── Vampire banner ───────────────────────────────────────────────────────────
 BANNER = f"""
-{dark_red}      .  *  .     .   *  . *  .   .  *  .     .   *
-  *  .  ,      .        *      .   *   .      .   *  .
-    .     ██╗   ██╗ █████╗ ███╗   ███╗██████╗{end}
-{dark_red}  .  *   ██║   ██║██╔══██╗████╗ ████║██╔══██╗{end}      {purple}🦇{end}
-{dark_red}         ╚██╗ ██╔╝███████║██╔████╔██║██████╔╝{end}
-{dark_red}      *   ╚████╔╝ ██║  ██║██║╚██╔╝██║██╔═══╝{end}   {purple}🦇{end}
-{dark_red}  .        ╚═══╝  ╚═╝  ╚═╝╚═╝     ╚═╝╚═╝{end}
-{dark_red}  ██████╗██████╗  █████╗ ██╗    ██╗██╗     ███████╗██████╗{end}
-{dark_red} ██╔════╝██╔══██╗██╔══██╗██║    ██║██║     ██╔════╝██╔══██╗{end}
-{dark_red} ██║     ██████╔╝███████║██║ █╗ ██║██║     █████╗  ██████╔╝{end}
-{dark_red} ██║     ██╔══██╗██╔══██║██║███╗██║██║     ██╔══╝  ██╔══██╗{end}
-{dark_red} ╚██████╗██║  ██║██║  ██║╚███╔███╔╝███████╗███████╗██║  ██║{end}
-{dark_red}  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝{end}
-{purple}             ☽  The Gothic Web Stalker  ☾{end}          {dark_red}v1.0.0{end}
+{dark_red}🦇 Vampiric Crawler{end}  {purple}v1.0.0{end}
+{crypt}The Gothic Web Stalker — clear first, gothic second.{end}
 """
 print(BANNER)
 
@@ -67,10 +55,11 @@ from core.requester import requester, get_session
 from core.utils import (
     luhn, proxy_type, is_good_proxy, top_level,
     extract_headers, verb, is_link, entropy,
-    regxy, remove_regex, remove_file, timer, writer,
+    regxy, remove_regex, timer, writer,
     should_extract_markup, should_extract_script, CrawlStats,
+    normalize_url, normalize_fuzzable_url, is_in_scope,
 )
-from core.regex import rintels, rendpoint, rhref, rscript, rentropy
+from core.regex import rintels, rendpoint, rhref, rscript, rentropy, rsecrets
 from core.zap import zap
 
 # ── CLI arguments ─────────────────────────────────────────────────────────────
@@ -145,6 +134,9 @@ parser.add_argument('--wayback',
 parser.add_argument('--only-urls',
                     help='Only harvest URLs, skip intel extraction',
                     dest='only_urls', action='store_true')
+parser.add_argument('--scope',
+                    help='Scope of the hunt: exact host or full registered domain',
+                    dest='scope', choices=['host', 'domain'], default='host')
 parser.add_argument('-v', '--verbose',
                     help='Show every drop of blood (verbose output)',
                     dest='verbose', action='store_true')
@@ -170,6 +162,7 @@ api          = bool(args.api)
 only_urls    = bool(args.only_urls)
 crawl_level  = args.level
 thread_count = args.threads
+scope_mode   = args.scope
 
 try:
     headers = extract_headers('\n'.join(args.headers))
@@ -204,7 +197,11 @@ else:
     except Exception:
         main_url = 'http://' + main_inp
 
-schema = main_url.split('//')[0]
+main_url = normalize_url(main_url)
+if not main_url:
+    print(f'{coffin}The chosen prey could not be normalized into a crawlable URL.')
+    sys.exit(1)
+
 host   = urlparse(main_url).netloc
 
 try:
@@ -239,9 +236,10 @@ redirects = set()            # Redirect trails
 scripts   = set()            # JavaScript files
 external  = set()            # Out-of-scope URLs
 fuzzable  = set()            # URLs with query parameters
+forms     = set()            # HTML forms with action/method/inputs
 endpoints = set()            # JS-extracted API endpoints
 processed = {'dummy'}        # Sentinel entry; real visited count subtracts this seed.
-internal  = set(args.seeds)  # In-scope URLs queue
+internal  = set()            # In-scope URLs queue
 
 bad_scripts = set()
 bad_intel   = set()
@@ -252,27 +250,27 @@ suppress_regex = False
 
 def mark_scope(url):
     """Record *url* as internal or external based on scope."""
-    if not url:
-        return
-    if url.startswith(main_url):
-        internal.add(url)
-    elif url.startswith('//'):
-        if url.split('/')[2].startswith(host):
-            internal.add(f'{schema}{url}')
-        else:
-            external.add(url)
-    elif url.startswith('http'):
-        external.add(url)
+    normalized = normalize_url(url, base_url=main_url)
+    if not normalized:
+        return ''
+    if is_in_scope(normalized, host, domain, scope_mode):
+        internal.add(normalized)
+    else:
+        external.add(normalized)
+    return normalized
 
 
 def record_request_outcome(url, result, purpose):
     """Track redirect and skip metadata before extraction begins."""
     if result.redirected:
-        # Append the final URL so the saved trail shows the full redirect chain.
-        trail = ' -> '.join([*result.redirect_chain, result.final_url])
+        trail = ' -> '.join(
+            normalize_url(hop, base_url=main_url) or hop
+            for hop in [*result.redirect_chain, result.final_url]
+        )
         redirects.add(f'{url} => {trail}')
-        if result.final_url != url:
-            mark_scope(result.final_url)
+    normalized_final = normalize_url(result.final_url, base_url=main_url)
+    if normalized_final and normalized_final != url:
+        mark_scope(normalized_final)
 
     if result.skip_reason:
         skipped.add(f'{purpose}:{url}:{result.skip_reason}')
@@ -298,21 +296,66 @@ def record_request_outcome(url, result, purpose):
 
 def intel_extractor(url, response):
     """Sift through the victim's response for secrets."""
+    res = re.sub(r'<script.*?>.*?</script>', '', response, flags=re.I | re.S)
+    res = re.sub(r'<[^<]+?>', '', res)
     for name, pattern in rintels:
-        # Strip scripts and tags for cleaner text intel
-        res = re.sub(r'<(script).*?</\1>(?s)', '', response)
-        res = re.sub(r'<[^<]+?>', '', res)
         for match in pattern.findall(res):
             verb('Intel', match)
             bad_intel.add((match, name, url))
 
 
-def js_extractor(response):
+def js_extractor(page_url, response):
     """Extract JavaScript file references from the response."""
     for match in rscript.findall(response):
-        src = match[2].replace("'", '').replace('"', '')
+        src = normalize_url(match[2].replace("'", '').replace('"', ''), base_url=page_url)
+        if not src:
+            continue
         verb('JS file', src)
         bad_scripts.add(src)
+
+
+def form_extractor(page_url, response):
+    """Extract HTML forms as a first-class dataset."""
+    for form_match in re.finditer(r'<form\b([^>]*)>(.*?)</form>', response, re.I | re.S):
+        attrs = form_match.group(1)
+        body = form_match.group(2)
+        action_match = re.search(r'action\s*=\s*(["\'])(.*?)\1', attrs, re.I)
+        method_match = re.search(r'method\s*=\s*(["\'])(.*?)\1', attrs, re.I)
+        action = normalize_url(
+            action_match.group(2) if action_match else page_url,
+            base_url=page_url,
+        )
+        method = (method_match.group(2) if method_match else 'GET').upper()
+        fields = []
+        for input_match in re.finditer(r'<(?:input|textarea|select)\b([^>]*)>', body, re.I | re.S):
+            tag_attrs = input_match.group(1)
+            name_match = re.search(r'name\s*=\s*(["\'])(.*?)\1', tag_attrs, re.I)
+            if not name_match:
+                continue
+            field_name = name_match.group(2)
+            type_match = re.search(r'type\s*=\s*(["\'])(.*?)\1', tag_attrs, re.I)
+            field_type = (type_match.group(2) if type_match else 'text').lower()
+            fields.append(f'{field_name}:{field_type}')
+        forms.add(
+            f'action={action or page_url} method={method} inputs={",".join(sorted(fields))}'
+        )
+
+
+def secret_extractor(url, response):
+    """Extract high-value tokens before falling back to generic entropy hits."""
+    seen = set()
+    for secret_name, pattern in rsecrets:
+        for match in pattern.findall(response):
+            token = match if isinstance(match, str) else next((item for item in match if item), '')
+            token = token.strip()
+            if token and (secret_name, token) not in seen:
+                verb('Key', f'{secret_name}: {token}')
+                keys.add(f'{url}:{secret_name}:{token}')
+                seen.add((secret_name, token))
+    for match in rentropy.findall(response):
+        if entropy(match) >= 4:
+            verb('Key', f'HIGH_ENTROPY: {match}')
+            keys.add(f'{url}:HIGH_ENTROPY:{match}')
 
 
 def extractor(url):
@@ -328,43 +371,27 @@ def extractor(url):
     # Harvest links
     for link_match in rhref.findall(response):
         link = link_match[2].replace("'", '').replace('"', '').split('#')[0]
-        if not is_link(link, processed, files):
+        normalized_link = normalize_url(link, base_url=url)
+        if not is_link(normalized_link or link, processed, files):
             continue
-        if link.startswith('http'):
-            if link.startswith(main_url):
-                verb('Internal page', link)
-                internal.add(link)
-            else:
-                verb('External page', link)
-                external.add(link)
-        elif link.startswith('//'):
-            if link.split('/')[2].startswith(host):
-                verb('Internal page', link)
-                internal.add(f'{schema}{link}')
-            else:
-                verb('External page', link)
-                external.add(link)
-        elif link.startswith('/'):
-            verb('Internal page', link)
-            internal.add(main_url.rstrip('/') + link)
+        scoped_link = mark_scope(normalized_link or link)
+        if not scoped_link:
+            continue
+        if is_in_scope(scoped_link, host, domain, scope_mode):
+            verb('Internal page', scoped_link)
         else:
-            base = remove_file(url)
-            full = (base + '/' + link) if not base.endswith('/') else (base + link)
-            verb('Internal page', full)
-            internal.add(full)
+            verb('External page', scoped_link)
 
     if not only_urls:
         intel_extractor(url, response)
-        js_extractor(response)
+        js_extractor(url, response)
+        form_extractor(url, response)
 
     if args.regex and not suppress_regex:
         regxy(args.regex, response, suppress_regex, custom)
 
     if api:
-        for match in rentropy.findall(response):
-            if entropy(match) >= 4:
-                verb('Key', match)
-                keys.add(f'{url}: {match}')
+        secret_extractor(url, response)
 
 
 def jscanner(url):
@@ -386,16 +413,23 @@ def jscanner(url):
 # ── Begin the hunt ─────────────────────────────────────────────────────────────
 print(f'{fang}Target locked: {bold}{main_url}{end}')
 print(f'{fang}The hunt begins… '
-      f'depth={crawl_level}, threads={thread_count}, delay={delay}s')
+      f'depth={crawl_level}, threads={thread_count}, delay={delay}s, scope={scope_mode}')
 print(f'{dark_red}{"─" * 60}{end}')
 
 then = time.time()
 
 # Seed from robots.txt, sitemap.xml (and optionally Wayback Machine)
 zap(main_url, args.archive, domain, host, internal, robots, proxies, headers)
-internal.add(main_url)
-
-internal = set(remove_regex(internal, args.exclude))
+seeded = set()
+for seed in list(internal) + args.seeds + [main_url]:
+    normalized_seed = normalize_url(seed, base_url=main_url)
+    if not normalized_seed:
+        continue
+    if is_in_scope(normalized_seed, host, domain, scope_mode):
+        seeded.add(normalized_seed)
+    else:
+        external.add(normalized_seed)
+internal = set(remove_regex(seeded, args.exclude))
 
 # ── Recursive crawl ────────────────────────────────────────────────────────────
 for level in range(crawl_level):
@@ -415,12 +449,13 @@ for level in range(crawl_level):
 # ── Scan JavaScript files ──────────────────────────────────────────────────────
 if not only_urls:
     for src in bad_scripts:
-        if src.startswith(main_url):
-            scripts.add(src)
-        elif src.startswith('/') and not src.startswith('//'):
-            scripts.add(main_url.rstrip('/') + src)
-        elif not src.startswith('http') and not src.startswith('//'):
-            scripts.add(main_url.rstrip('/') + '/' + src)
+        normalized_script = normalize_url(src, base_url=main_url)
+        if not normalized_script:
+            continue
+        if is_in_scope(normalized_script, host, domain, scope_mode):
+            scripts.add(normalized_script)
+        else:
+            external.add(normalized_script)
 
     if scripts:
         print(f'{fang}Draining {len(scripts)} JavaScript script'
@@ -429,8 +464,9 @@ if not only_urls:
 
     # Build fuzzable URLs
     for url in internal:
-        if '=' in url:
-            fuzzable.add(url)
+        fuzzable_url = normalize_fuzzable_url(url)
+        if fuzzable_url:
+            fuzzable.add(fuzzable_url)
 
     # Finalise intel
     for match, intel_name, url in bad_intel:
@@ -460,11 +496,12 @@ minutes, seconds, _ = timer(diff, processed)
 # ── Save results ───────────────────────────────────────────────────────────────
 os.makedirs(output_dir, exist_ok=True)
 
-datasets      = [files, intel, robots, custom, failed, skipped, redirects,
-                 internal, scripts, external, fuzzable, endpoints, keys]
-dataset_names = ['files', 'intel', 'robots', 'custom', 'failed', 'skipped',
-                 'redirects', 'internal', 'scripts', 'external', 'fuzzable',
-                 'endpoints', 'keys']
+datasets      = [files, forms, intel, robots, custom, failed, skipped,
+                 redirects, internal, scripts, external, fuzzable,
+                 endpoints, keys]
+dataset_names = ['files', 'forms', 'intel', 'robots', 'custom', 'failed',
+                 'skipped', 'redirects', 'internal', 'scripts', 'external',
+                 'fuzzable', 'endpoints', 'keys']
 
 writer(datasets, dataset_names, output_dir)
 
@@ -477,27 +514,29 @@ writer([[
 
 # ── Print summary ──────────────────────────────────────────────────────────────
 print(f'\n{dark_red}{"─" * 60}{end}')
+print(f'{blood}Harvest summary{end}')
 for dataset, name in zip(datasets, dataset_names):
     if dataset:
-        print(f'{blood}{name.capitalize()}: {len(dataset)}')
+        print(f'{fang}{name.capitalize():<14} {len(dataset)}')
 print(f'{dark_red}{"─" * 60}{end}')
-print(f'{fang}Total URLs visited : {visited_count}')
-print(f'{fang}Time elapsed       : {minutes}m {seconds}s')
+print(f'{fang}Visited         {visited_count}')
+print(f'{fang}Time elapsed    {minutes}m {seconds}s')
 if diff > 0:
-    print(f'{fang}Requests per second: {int(visited_count / diff)}')
-print(f'{fang}Blood trails       : {stats_summary["redirects"]} redirect(s)')
-print(f'{fang}Dry morsels        : {stats_summary["skipped"]} skipped response(s)')
-print(f'{fang}Failed feedings    : {stats_summary["failures"]} request failure(s)')
+    print(f'{fang}Req/sec         {int(visited_count / diff)}')
+print(f'{fang}Redirects       {stats_summary["redirects"]}')
+print(f'{fang}Skipped         {stats_summary["skipped"]}')
+print(f'{fang}Failures        {stats_summary["failures"]}')
 
 # ── Optional extras ────────────────────────────────────────────────────────────
 datasets_dict = {
-    'files':     sorted(files),    'intel':     sorted(intel),
-    'robots':    sorted(robots),   'custom':    sorted(custom),
-    'failed':    sorted(failed),   'skipped':   sorted(skipped),
-    'redirects': sorted(redirects), 'internal': sorted(internal),
-    'scripts':   sorted(scripts),  'external':  sorted(external),
-    'fuzzable':  sorted(fuzzable), 'endpoints': sorted(endpoints),
-    'keys':      sorted(keys),     'stats':     stats_summary,
+    'files':     sorted(files),     'forms':     sorted(forms),
+    'intel':     sorted(intel),     'robots':    sorted(robots),
+    'custom':    sorted(custom),    'failed':    sorted(failed),
+    'skipped':   sorted(skipped),   'redirects': sorted(redirects),
+    'internal':  sorted(internal),  'scripts':   sorted(scripts),
+    'external':  sorted(external),  'fuzzable':  sorted(fuzzable),
+    'endpoints': sorted(endpoints), 'keys':      sorted(keys),
+    'stats':     stats_summary,
 }
 
 if args.dns:
