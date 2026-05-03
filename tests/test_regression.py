@@ -251,6 +251,41 @@ class RegressionTests(unittest.TestCase):
                 recorded_args = handle.read().splitlines()
             self.assertEqual(recorded_args, ['vampire.py', '-u', 'https://example.com'])
 
+    def test_launch_script_rejects_empty_prompt_input(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            launcher_path = os.path.join(tmpdir, 'launch.sh')
+            with open(os.path.join(REPO_ROOT, 'launch.sh'), 'r', encoding='utf-8') as src:
+                launcher = src.read()
+            with open(launcher_path, 'w', encoding='utf-8') as handle:
+                handle.write(launcher)
+            os.chmod(launcher_path, 0o755)
+
+            bin_dir = os.path.join(tmpdir, 'bin')
+            os.makedirs(bin_dir)
+            python_stub = os.path.join(bin_dir, 'python3')
+            with open(python_stub, 'w', encoding='utf-8') as handle:
+                handle.write('#!/usr/bin/env bash\nexit 0\n')
+            os.chmod(python_stub, 0o755)
+
+            env = os.environ.copy()
+            env['PATH'] = bin_dir + os.pathsep + env.get('PATH', '')
+            env['VAMPIRIC_LAUNCH_PROMPT'] = '1'
+
+            result = subprocess.run(
+                [launcher_path],
+                cwd=tmpdir,
+                input='\n',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 1, msg=result.stderr)
+            self.assertIn('Enter target URL', result.stdout)
+            self.assertIn('No prey specified. Closing the coffin.', result.stdout)
+
     def test_cli_regression_for_headers_stats_redirects_forms_and_exports(self):
         FixtureHandler.header_failures = []
         FixtureHandler.flaky_hits = 0
