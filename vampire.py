@@ -240,7 +240,7 @@ scripts   = set()            # JavaScript files
 external  = set()            # Out-of-scope URLs
 fuzzable  = set()            # URLs with query parameters
 endpoints = set()            # JS-extracted API endpoints
-processed = {'dummy'}        # Already-visited URLs
+processed = {'dummy'}        # Sentinel entry; real visited count subtracts this seed.
 internal  = set(args.seeds)  # In-scope URLs queue
 
 bad_scripts = set()
@@ -269,7 +269,7 @@ def record_request_outcome(url, result, purpose):
     """Track redirect and skip metadata before extraction begins."""
     if result.redirected:
         # Append the final URL so the saved trail shows the full redirect chain.
-        trail = ' -> '.join(result.redirect_chain + (result.final_url,))
+        trail = ' -> '.join([*result.redirect_chain, result.final_url])
         redirects.add(f'{url} => {trail}')
         if result.final_url != url:
             mark_scope(result.final_url)
