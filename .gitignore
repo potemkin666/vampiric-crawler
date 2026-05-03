@@ -12,6 +12,7 @@ env/
 # Crawl output directories (not the tool itself)
 # Uncomment to ignore all loot folders:
 # */
+webui_runs/
 
 # OS artefacts
 .DS_Store

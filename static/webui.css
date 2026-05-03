@@ -312,7 +312,9 @@ body::after {
 .flag-grid,
 .summary-chips,
 .export-buttons,
-.records-list {
+.records-list,
+.queue-grid,
+.result-ledger {
   display: grid;
   gap: 0.75rem;
 }
@@ -453,6 +455,18 @@ body::after {
   color: var(--text-bone);
 }
 
+.compact-log {
+  max-height: 10rem;
+}
+
+.state-banner {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px dashed rgba(227, 161, 63, 0.45);
+  color: var(--accent-amber);
+}
+
 .selectable {
   user-select: text;
 }
@@ -465,6 +479,54 @@ body::after {
   display: grid;
   gap: 0.4rem;
   margin-top: 0.75rem;
+}
+
+.queue-grid {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin-top: 0.75rem;
+}
+
+.queue-card,
+.result-row {
+  padding: 0.7rem;
+  border: 1px dashed rgba(133, 255, 152, 0.22);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.queue-items,
+.result-meta {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+  color: var(--text-bone);
+}
+
+.result-toolbar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.result-toolbar select {
+  border: 1px solid rgba(133, 255, 152, 0.25);
+  background: rgba(5, 10, 7, 0.9);
+  color: var(--text-bone);
+  padding: 0.55rem 0.65rem;
+  font: inherit;
+}
+
+.result-ledger {
+  margin-top: 1rem;
+}
+
+.result-meta {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
+.result-error {
+  margin-top: 0.55rem;
+  color: var(--accent-amber);
 }
 
 .result-item {

@@ -10,7 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
-import uuid
+import zipfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,7 +20,24 @@ from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
-from core.modes import MODE_DATASET_NAMES, MODE_DEFINITIONS, coerce_mode
+from core.autopsy import (
+    ANALYSIS_DATASET_NAMES,
+    build_autopsy,
+    build_mutation_probes,
+    build_site_anatomy,
+    finalize_genealogy,
+    render_autopsy_markdown,
+)
+from core.modes import (
+    MODE_DATASET_NAMES,
+    MODE_DEFINITIONS,
+    PRESET_DEFINITIONS,
+    RITUAL_CHAIN_DEFINITIONS,
+    coerce_mode,
+    coerce_preset,
+    coerce_ritual_chain,
+)
+from core.specimen import apply_preset, classify_specimen, resolve_ritual_plan
 from plugins.exporter import exporter
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -46,8 +63,10 @@ DATASET_FILES = (
     'stats',
     'subdomains',
     *MODE_DATASET_NAMES,
+    *ANALYSIS_DATASET_NAMES,
 )
 TEXT_LIMIT = 250
+WEBUI_EVENT_PREFIX = '[WEBUI]'
 STATUS_MESSAGES = {
     'idle': 'THE CRAWLER SLEEPS',
     'ready': 'TARGET ACQUIRED',
@@ -59,6 +78,21 @@ STATUS_MESSAGES = {
     'empty': 'THE ARCHIVE IS SILENT',
     'stopping': 'HALT RITE',
 }
+
+
+def default_queue_snapshot() -> dict[str, dict[str, Any]]:
+    return {
+        name: {'count': 0, 'items': []}
+        for name in ('pending', 'active', 'completed', 'skipped')
+    }
+
+
+def default_robots_metadata() -> dict[str, Any]:
+    return {'rules': [], 'crawl_delay': None}
+
+
+def default_sitemap_metadata() -> dict[str, Any]:
+    return {'sitemap_urls': [], 'queued_urls': []}
 
 
 def now_iso() -> str:
@@ -120,10 +154,59 @@ def count_unique_scam_signal_types(items: list[str]) -> int:
     return len({item.split(' signal=', 1)[-1].split(' ', 1)[0] for item in items})
 
 
+def resolve_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    specimen_input = (payload.get('target_specimen') or payload.get('target_url') or '').strip()
+    if not specimen_input:
+        raise ValueError('TARGET SPECIMEN is required.')
+    specimen = classify_specimen(specimen_input, payload.get('input_kind'))
+    ritual = resolve_ritual_plan(specimen, payload.get('ritual_chain'), payload.get('mode'))
+    resolved = {
+        'target_specimen': specimen_input,
+        'target_url': (specimen.get('crawl_roots') or [''])[0] or specimen_input,
+        'specimen': specimen,
+        'ritual_chain': ritual['ritual_chain'],
+        'ritual_label': ritual['label'],
+        'ritual_description': ritual['description'],
+        'mode': ritual['mode'],
+        'input_kind': payload.get('input_kind', 'auto'),
+        'scope': payload.get('scope', 'host'),
+        'extract_intel': payload.get('extract_intel', True),
+        'extract_secrets': payload.get('extract_secrets', False),
+        'respect_robots_delay': payload.get('respect_robots_delay', True),
+        'render_js': payload.get('render_js', False),
+        'archive_seeds': payload.get('archive_seeds', False),
+        'enumerate_subdomains': payload.get('enumerate_subdomains', False),
+        'dry_run': payload.get('dry_run', False),
+        'preset': coerce_preset(payload.get('preset')),
+        'depth': payload.get('depth', 2),
+        'threads': payload.get('threads', 4),
+        'delay': payload.get('delay', 0),
+        'timeout': payload.get('timeout', 8),
+    }
+    explicit = {'scope', 'extract_intel', 'extract_secrets', 'respect_robots_delay', 'render_js', 'archive_seeds', 'enumerate_subdomains', 'dry_run', 'input_kind'}
+    if 'depth' in payload:
+        explicit.add('depth')
+    if 'threads' in payload:
+        explicit.add('threads')
+    if 'delay' in payload:
+        explicit.add('delay')
+    if 'timeout' in payload:
+        explicit.add('timeout')
+    for key, value in ritual.get('defaults', {}).items():
+        if key not in explicit:
+            resolved[key] = value
+    resolved = apply_preset(resolved, resolved['preset'], explicit)
+    resolved['mode'] = coerce_mode(payload.get('mode') or resolved['mode'])
+    if payload.get('temporal_baseline'):
+        resolved['temporal_baseline'] = payload['temporal_baseline']
+    return resolved
+
+
 def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_path: Path) -> list[str]:
-    target_url = (payload.get('target_url') or '').strip()
-    if not target_url:
-        raise ValueError('TARGET URL is required.')
+    payload = resolve_payload(payload)
+    target_specimen = (payload.get('target_specimen') or '').strip()
+    if not target_specimen:
+        raise ValueError('TARGET SPECIMEN is required.')
 
     depth = max(1, min(int(payload.get('depth', 2)), 8))
     threads = max(1, min(int(payload.get('threads', 4)), 32))
@@ -138,8 +221,8 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         sys.executable,
         '-u',
         str(ENTRYPOINT),
-        '-u',
-        target_url,
+        '--target',
+        target_specimen,
         '-l',
         str(depth),
         '-t',
@@ -152,6 +235,12 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         scope,
         '--mode',
         mode,
+        '--ritual-chain',
+        coerce_ritual_chain(payload.get('ritual_chain')),
+        '--preset',
+        coerce_preset(payload.get('preset')),
+        '--input-kind',
+        str(payload.get('input_kind', 'auto')),
         '--checkpoint',
         str(checkpoint_path),
         '-o',
@@ -171,16 +260,23 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         command.append('--keys')
     if not payload.get('extract_intel', True):
         command.append('--only-urls')
+    if payload.get('dry_run'):
+        command.append('--dry-run')
     if payload.get('temporal_baseline'):
         command.extend(['--temporal-baseline', str(payload['temporal_baseline'])])
     return command
 
 
 def command_preview(payload: dict[str, Any]) -> str:
+    payload = resolve_payload(payload)
     mode = coerce_mode(payload.get('mode'))
-    preview = f'CRAWL {(payload.get("target_url") or "").strip()} --depth {int(payload.get("depth", 2))}'
+    preview = f'CRAWL {(payload.get("target_specimen") or "").strip()} --depth {int(payload.get("depth", 2))}'
+    if payload.get('ritual_chain'):
+        preview += f' --ritual-chain {payload["ritual_chain"]}'
     if mode != 'generic':
         preview += f' --mode {mode}'
+    if payload.get('preset', 'balanced') != 'balanced':
+        preview += f' --preset {payload["preset"]}'
     if payload.get('scope', 'host') == 'domain':
         preview += ' --scope domain'
     if payload.get('render_js'):
@@ -189,6 +285,8 @@ def command_preview(payload: dict[str, Any]) -> str:
         preview += ' --wayback'
     if payload.get('enumerate_subdomains'):
         preview += ' --dns'
+    if payload.get('dry_run'):
+        preview += ' --dry-run'
     return preview.strip()
 
 
@@ -212,10 +310,17 @@ class CrawlRun:
     errors: deque[str] = field(default_factory=lambda: deque(maxlen=150))
     lock: threading.Lock = field(default_factory=threading.Lock)
     exports_ready: bool = False
+    result_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    queue_snapshot: dict[str, dict[str, Any]] = field(default_factory=default_queue_snapshot)
+    robots_metadata: dict[str, Any] = field(default_factory=default_robots_metadata)
+    sitemap_metadata: dict[str, Any] = field(default_factory=default_sitemap_metadata)
 
     def ingest_log(self, raw_line: str) -> None:
         line = strip_ansi(raw_line)
         if not line:
+            return
+        if line.startswith(WEBUI_EVENT_PREFIX):
+            self.ingest_event(line[len(WEBUI_EVENT_PREFIX):])
             return
         with self.lock:
             self.logs.append(line)
@@ -239,8 +344,62 @@ class CrawlRun:
             ):
                 self.errors.append(line)
 
+    def ingest_event(self, payload: str) -> None:
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+        event_type = event.get('type')
+        data = event.get('payload') or {}
+        with self.lock:
+            if event_type == 'result' and isinstance(data, dict) and data.get('url'):
+                self.result_records[str(data['url'])] = {
+                    'url': str(data.get('url') or ''),
+                    'status_code': data.get('status_code'),
+                    'content_type': str(data.get('content_type') or ''),
+                    'depth': data.get('depth'),
+                    'source_page': str(data.get('source_page') or ''),
+                    'discovery_time': int(data.get('discovery_time') or 0),
+                    'state': str(data.get('state') or 'pending'),
+                    'error_kind': str(data.get('error_kind') or ''),
+                    'error_message': str(data.get('error_message') or ''),
+                    'source_kind': str(data.get('source_kind') or ''),
+                }
+            elif event_type == 'queue' and isinstance(data, dict):
+                self.queue_snapshot = {
+                    name: {
+                        'count': int((details or {}).get('count') or 0),
+                        'items': [str(item) for item in ((details or {}).get('items') or [])],
+                    }
+                    for name, details in data.items()
+                }
+            elif event_type == 'robots' and isinstance(data, dict):
+                self.robots_metadata = {
+                    'rules': list(data.get('rules') or []),
+                    'crawl_delay': data.get('crawl_delay'),
+                }
+            elif event_type == 'sitemap' and isinstance(data, dict):
+                self.sitemap_metadata = {
+                    'sitemap_urls': [str(item) for item in (data.get('sitemap_urls') or [])],
+                    'queued_urls': [str(item) for item in (data.get('queued_urls') or [])],
+                }
+            elif event_type == 'error' and isinstance(data, dict):
+                message = data.get('message') or 'The rite failed.'
+                category = data.get('category')
+                url = data.get('url')
+                status_code = data.get('status_code')
+                parts = [str(message)]
+                if category:
+                    parts.append(f'category={category}')
+                if status_code:
+                    parts.append(f'status={status_code}')
+                if url:
+                    parts.append(f'url={url}')
+                self.errors.append(' | '.join(parts))
+
     def snapshot(self, history: list[dict[str, Any]]) -> dict[str, Any]:
         datasets, stats = collect_run_artifacts(self.output_dir, self.checkpoint_path)
+        checkpoint_meta = load_checkpoint_metadata(self.checkpoint_path)
         visible_status = self.status
         if visible_status == 'ready' and self.process:
             visible_status = 'running'
@@ -250,12 +409,21 @@ class CrawlRun:
             logs = list(self.logs)
             feed = list(self.feed)
             errors = list(self.errors)
+            result_records = dict(self.result_records)
+            queue_snapshot = dict(self.queue_snapshot)
+            robots_metadata = dict(self.robots_metadata)
+            sitemap_metadata = dict(self.sitemap_metadata)
         return {
             'id': self.run_id,
             'status': visible_status,
             'status_message': STATUS_MESSAGES.get(visible_status, STATUS_MESSAGES['idle']),
             'status_detail': self.status_detail,
             'target_url': self.payload.get('target_url', ''),
+            'target_specimen': self.payload.get('target_specimen', self.payload.get('target_url', '')),
+            'specimen_type': self.payload.get('specimen', {}).get('type', 'url'),
+            'ritual_chain': coerce_ritual_chain(self.payload.get('ritual_chain')),
+            'ritual_label': self.payload.get('ritual_label', ''),
+            'preset': coerce_preset(self.payload.get('preset')),
             'mode': coerce_mode(self.payload.get('mode')),
             'mode_label': mode_label(self.payload.get('mode')),
             'mode_description': mode_description(self.payload.get('mode')),
@@ -270,6 +438,10 @@ class CrawlRun:
             'logs': logs,
             'feed': feed,
             'errors': errors,
+            'queue': queue_snapshot if any(details.get('count') for details in queue_snapshot.values()) else checkpoint_meta['queue'],
+            'robots_details': robots_metadata if robots_metadata.get('rules') or robots_metadata.get('crawl_delay') is not None else checkpoint_meta['robots'],
+            'sitemap_details': sitemap_metadata if sitemap_metadata.get('sitemap_urls') or sitemap_metadata.get('queued_urls') else checkpoint_meta['sitemap'],
+            'result_rows': build_result_rows(result_records or checkpoint_meta['results']),
             'summary': build_summary(self.payload, datasets, stats),
             'panels': build_panels(self.payload, datasets, stats),
             'exports': build_exports(self.output_dir),
@@ -306,10 +478,76 @@ def collect_run_artifacts(output_dir: Path, checkpoint_path: Path) -> tuple[dict
     return datasets, stats
 
 
+def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
+    metadata = {
+        'queue': default_queue_snapshot(),
+        'results': {},
+        'robots': default_robots_metadata(),
+        'sitemap': default_sitemap_metadata(),
+    }
+    if not checkpoint_path.exists():
+        return metadata
+    try:
+        with checkpoint_path.open('r', encoding='utf-8') as handle:
+            checkpoint = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return metadata
+
+    queue_state = checkpoint.get('queue_state') or {}
+    if isinstance(queue_state, dict):
+        metadata['queue'] = {
+            name: {
+                'count': len(values or []),
+                'items': [str(item) for item in (values or [])[:12]],
+            }
+            for name, values in queue_state.items()
+        }
+    crawl_records = checkpoint.get('crawl_records') or {}
+    if isinstance(crawl_records, dict):
+        metadata['results'] = crawl_records
+    robots_metadata = checkpoint.get('robots_metadata') or {}
+    if isinstance(robots_metadata, dict):
+        metadata['robots'] = {
+            'rules': list(robots_metadata.get('rules') or []),
+            'crawl_delay': robots_metadata.get('crawl_delay'),
+        }
+    sitemap_metadata = checkpoint.get('sitemap_metadata') or {}
+    if isinstance(sitemap_metadata, dict):
+        metadata['sitemap'] = {
+            'sitemap_urls': [str(item) for item in (sitemap_metadata.get('sitemap_urls') or [])],
+            'queued_urls': [str(item) for item in (sitemap_metadata.get('queued_urls') or [])],
+        }
+    return metadata
+
+
+def build_result_rows(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for url, raw in sorted(records.items(), key=lambda item: int((item[1] or {}).get('discovery_time') or 0)):
+        raw = raw or {}
+        rows.append({
+            'url': str(raw.get('url') or url),
+            'status_code': raw.get('status_code'),
+            'content_type': str(raw.get('content_type') or ''),
+            'depth': raw.get('depth'),
+            'source_page': str(raw.get('source_page') or ''),
+            'discovery_time': int(raw.get('discovery_time') or 0),
+            'state': str(raw.get('state') or 'pending'),
+            'error_kind': str(raw.get('error_kind') or ''),
+            'error_message': str(raw.get('error_message') or ''),
+            'source_kind': str(raw.get('source_kind') or ''),
+        })
+    return rows
+
+
 def build_summary(payload: dict[str, Any], datasets: dict[str, list[str]], stats: dict[str, Any]) -> dict[str, Any]:
     mode = coerce_mode(payload.get('mode'))
     summary = {
         'target': payload.get('target_url', ''),
+        'target_specimen': payload.get('target_specimen', payload.get('target_url', '')),
+        'specimen_type': payload.get('specimen', {}).get('type', 'url'),
+        'ritual_chain': coerce_ritual_chain(payload.get('ritual_chain')),
+        'ritual_label': payload.get('ritual_label', ''),
+        'preset': coerce_preset(payload.get('preset')),
         'mode': mode,
         'mode_label': mode_label(mode),
         'mode_description': mode_description(mode),
@@ -395,17 +633,20 @@ def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats:
         'hidden_paths': {'key': 'hidden_paths', 'title': 'SHADOW GATES', 'count': len(datasets.get('hidden_paths', [])), 'items': datasets.get('hidden_paths', [])[:TEXT_LIMIT]},
         'scam_signals': {'key': 'scam_signals', 'title': 'HEXED MERCHANT OMENS', 'count': len(datasets.get('scam_signals', [])), 'items': datasets.get('scam_signals', [])[:TEXT_LIMIT]},
         'temporal_diffs': {'key': 'temporal_diffs', 'title': 'TIME-SLICE OMENS', 'count': len(datasets.get('temporal_diffs', [])), 'items': datasets.get('temporal_diffs', [])[:TEXT_LIMIT]},
+        'site_anatomy': {'key': 'site_anatomy', 'title': 'SITE ANATOMY', 'count': len(datasets.get('site_anatomy', [])), 'items': datasets.get('site_anatomy', [])[:TEXT_LIMIT]},
+        'mutation_probes': {'key': 'mutation_probes', 'title': 'MUTATION ENGINE', 'count': len(datasets.get('mutation_probes', [])), 'items': datasets.get('mutation_probes', [])[:TEXT_LIMIT]},
+        'artifact_genealogy': {'key': 'artifact_genealogy', 'title': 'ARTIFACT GENEALOGY', 'count': len(datasets.get('artifact_genealogy', [])), 'items': datasets.get('artifact_genealogy', [])[:TEXT_LIMIT]},
     }
     mode_layout = {
-        'document': ['document_metadata', 'document_leaks', 'documents', 'links', 'vitals'],
-        'js-intel': ['js_intel', 'scripts', 'links', 'relics', 'vitals'],
+        'document': ['document_metadata', 'document_leaks', 'artifact_genealogy', 'documents', 'links', 'vitals'],
+        'js-intel': ['js_intel', 'mutation_probes', 'scripts', 'links', 'relics', 'vitals'],
         'forum': ['threads', 'links', 'mail', 'vitals'],
         'geo': ['locations', 'links', 'vitals'],
         'news': ['stories', 'links', 'vitals'],
         'hidden': ['hidden_paths', 'links', 'broken', 'vitals'],
         'scam': ['scam_signals', 'links', 'forms', 'vitals'],
-        'temporal': ['temporal_diffs', 'links', 'vitals'],
-        'generic': ['links', 'mail', 'documents', 'relics', 'scripts', 'broken', 'forms', 'vitals'],
+        'temporal': ['temporal_diffs', 'artifact_genealogy', 'links', 'vitals'],
+        'generic': ['site_anatomy', 'mutation_probes', 'links', 'mail', 'documents', 'relics', 'scripts', 'broken', 'forms', 'vitals'],
     }
     ordered_keys = mode_layout.get(mode, mode_layout['generic'])
     selected = [panels[key] for key in ordered_keys if panels[key]['count'] or key == 'vitals']
@@ -416,7 +657,9 @@ def build_exports(output_dir: Path) -> list[dict[str, str]]:
     files = (
         ('json', 'EXPORT JSON', output_dir / 'results.json'),
         ('csv', 'EXPORT CSV', output_dir / 'results.csv'),
-        ('report', 'SAVE REPORT', output_dir / 'sealed-report.txt'),
+        ('autopsy-json', 'AUTOPSY JSON', output_dir / 'autopsy.json'),
+        ('autopsy-md', 'AUTOPSY MD', output_dir / 'autopsy.md'),
+        ('bundle', 'EXPORT BUNDLE', output_dir / 'sealed-bundle.zip'),
     )
     return [
         {'kind': kind, 'label': label, 'href': f'/api/exports/{kind}'}
@@ -436,23 +679,41 @@ def ensure_exports(run: CrawlRun) -> None:
         return
     exporter(str(run.output_dir), 'json', payload)
     exporter(str(run.output_dir), 'csv', payload)
-    report_path = run.output_dir / 'sealed-report.txt'
-    report_lines = [
-        'VAMPIRIC CRAWLER // SEALED RECORD',
-        f'TARGET URL={run.payload.get("target_url", "")}',
-        f'DEPTH OF DESCENT={run.payload.get("depth", 2)}',
-        f'VISITED={stats.get("visited", len(datasets.get("internal", [])))}',
-        f'LINKS UNEARTHED={len(datasets.get("internal", []))}',
-        f'RELICS FOUND={len(datasets.get("files", []))}',
-        f'MAIL SIGILS={len(filter_mail_sigils(datasets.get("intel", [])))}',
-        f'BROKEN GATES={len(datasets.get("failed", []))}',
-        '',
-    ]
-    for panel in build_panels(run.payload, datasets, stats):
-        report_lines.append(f'[{panel["title"]}]')
-        report_lines.extend(panel['items'][:50] or ['THE ARCHIVE IS SILENT'])
-        report_lines.append('')
-    report_path.write_text('\n'.join(report_lines), encoding='utf-8')
+    anatomy = build_site_anatomy(run.payload.get('target_url', ''), datasets, {}, run.payload.get('specimen', {}))
+    probes = build_mutation_probes(run.payload.get('target_url', ''), datasets)
+    autopsy = build_autopsy(
+        specimen=run.payload.get('specimen', {}),
+        ritual={
+            'ritual_chain': coerce_ritual_chain(run.payload.get('ritual_chain')),
+            'label': run.payload.get('ritual_label', ''),
+        },
+        preset=coerce_preset(run.payload.get('preset')),
+        mode=coerce_mode(run.payload.get('mode')),
+        datasets=payload,
+        stats=stats,
+        genealogy={},
+        anatomy=anatomy,
+        mutation_probes=probes,
+        exports=['results.json', 'results.csv', 'autopsy.json', 'autopsy.md', 'sealed-bundle.zip'],
+        duration_seconds=float(stats.get('duration_seconds', 0) or 0),
+        content_types={},
+    )
+    autopsy_json_path = run.output_dir / 'autopsy.json'
+    autopsy_md_path = run.output_dir / 'autopsy.md'
+    autopsy_json_path.write_text(json.dumps(autopsy, indent=2, ensure_ascii=False), encoding='utf-8')
+    autopsy_md_path.write_text(render_autopsy_markdown(autopsy), encoding='utf-8')
+    bundle_path = run.output_dir / 'sealed-bundle.zip'
+    with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for child in sorted(run.output_dir.iterdir()):
+            if child.name == bundle_path.name:
+                continue
+            archive.write(child, arcname=child.name)
+        archive.writestr('crawl-config.json', json.dumps({
+            'payload': run.payload,
+            'command': run.command,
+            'summary': build_summary(run.payload, datasets, stats),
+        }, indent=2, ensure_ascii=False))
+        archive.writestr('crawl-log.txt', '\n'.join(list(run.logs)))
     run.exports_ready = True
 
 
@@ -468,9 +729,13 @@ class CrawlManager:
         with self._lock:
             if self.current_run and self.current_run.status in {'running', 'paused', 'stopping'}:
                 raise RuntimeError('A crawl rite is already in progress.')
-            payload = dict(payload)
-            payload['mode'] = coerce_mode(payload.get('mode'))
-            run_id = f'{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}-{slugify_target(payload.get("target_url", ""))}-{uuid.uuid4().hex[:6]}'
+            payload = resolve_payload(dict(payload))
+            base_run_id = f'{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}-{slugify_target(payload.get("target_url", ""))}-{coerce_mode(payload.get("mode"))}'
+            run_id = base_run_id
+            suffix = 1
+            while (self.runs_root / run_id).exists():
+                suffix += 1
+                run_id = f'{base_run_id}-{suffix}'
             output_dir = self.runs_root / run_id
             if payload['mode'] == 'temporal' and not payload.get('temporal_baseline'):
                 baseline = self._latest_baseline(payload.get('target_url', ''), exclude_dir=output_dir)
@@ -486,7 +751,7 @@ class CrawlManager:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env={**os.environ, 'PYTHONUNBUFFERED': '1'},
+                env={**os.environ, 'PYTHONUNBUFFERED': '1', 'VAMPIRIC_WEBUI_EVENTS': '1'},
             )
             run = CrawlRun(
                 run_id=run_id,
@@ -585,8 +850,13 @@ class CrawlManager:
                 'id': None,
                 'status': 'idle',
                 'status_message': STATUS_MESSAGES['idle'],
-                'status_detail': 'Awaiting a target URL.',
+                'status_detail': 'Awaiting a target specimen.',
                 'target_url': '',
+                'target_specimen': '',
+                'specimen_type': 'url',
+                'ritual_chain': 'domain_necropsy',
+                'ritual_label': RITUAL_CHAIN_DEFINITIONS['domain_necropsy']['label'],
+                'preset': 'balanced',
                 'mode': 'generic',
                 'mode_label': mode_label('generic'),
                 'mode_description': mode_description('generic'),
@@ -594,6 +864,10 @@ class CrawlManager:
                 'logs': [],
                 'feed': [],
                 'errors': [],
+                'queue': default_queue_snapshot(),
+                'robots_details': default_robots_metadata(),
+                'sitemap_details': default_sitemap_metadata(),
+                'result_rows': [],
                 'summary': build_summary({}, {}, {}),
                 'panels': build_panels({}, {}, {}),
                 'exports': [],
@@ -615,7 +889,9 @@ class CrawlManager:
         mapping = {
             'json': run.output_dir / 'results.json',
             'csv': run.output_dir / 'results.csv',
-            'report': run.output_dir / 'sealed-report.txt',
+            'autopsy-json': run.output_dir / 'autopsy.json',
+            'autopsy-md': run.output_dir / 'autopsy.md',
+            'bundle': run.output_dir / 'sealed-bundle.zip',
         }
         path = mapping.get(kind)
         if path is None or not path.exists():
@@ -652,13 +928,26 @@ def create_app(runs_root: Path | None = None) -> Flask:
     def state() -> Any:
         return jsonify(app.config['CRAWL_MANAGER'].state())
 
+    @app.post('/api/preview')
+    def preview() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            resolved = resolve_payload(payload)
+        except ValueError as exc:
+            return error_response('The target specimen is malformed.', 400, exc)
+        return jsonify({
+            'command_preview': command_preview(resolved),
+            'resolved': resolved,
+            'preset_description': PRESET_DEFINITIONS[coerce_preset(resolved.get('preset'))]['description'],
+        })
+
     @app.post('/api/crawl')
     def start_crawl() -> Any:
         payload = request.get_json(silent=True) or {}
         try:
             run = app.config['CRAWL_MANAGER'].start(payload)
         except ValueError as exc:
-            return error_response('The target command is malformed.', 400, exc)
+            return error_response('The target specimen is malformed.', 400, exc)
         except RuntimeError as exc:
             return error_response('Another crawl rite is already active.', 409, exc)
         return jsonify(run.snapshot(list(app.config['CRAWL_MANAGER'].history))), 202

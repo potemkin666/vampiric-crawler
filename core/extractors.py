@@ -95,8 +95,11 @@ def link_extractor(page_url, response, context):
         normalized_link = normalize_url(link, base_url=page_url)
         candidate = normalized_link or link
         if not is_link(candidate, context['processed'], context['files']):
+            record_artifact = context.get('record_artifact_discovery')
+            if record_artifact and candidate in context['files']:
+                record_artifact(candidate, page_url, 'linked-file', 'anchor href')
             continue
-        scoped_link = context['mark_scope'](candidate)
+        scoped_link = context['mark_scope'](candidate, page_url, 'anchor-link')
         if not scoped_link:
             continue
         if context['verbose']:
@@ -122,6 +125,9 @@ def script_reference_extractor(page_url, response, context):
         if not src:
             continue
         context['bad_scripts'].add(src)
+        record_artifact = context.get('record_artifact_discovery')
+        if record_artifact:
+            record_artifact(src, page_url, 'script-reference', 'script tag')
 
 
 @register_page_extractor
@@ -207,6 +213,9 @@ def script_artifact_extractor(url, response, context):
         normalized = normalize_url(source_map.strip(), base_url=url)
         if normalized:
             context['files'].add(normalized)
+            record_artifact = context.get('record_artifact_discovery')
+            if record_artifact:
+                record_artifact(normalized, url, 'source-map', 'js source map')
     for match in INLINE_URL_RE.findall(response) + INLINE_PATH_RE.findall(response):
         _record_discovered_reference(url, match, context, from_script=True)
     if 'graphql' in response.lower():
@@ -270,10 +279,18 @@ def _record_discovered_reference(page_url, candidate, context, from_script=False
     path = urlsplit(normalized).path.lower()
     if any(path.endswith(ext) for ext in COMMON_DISCOVERY_FILES):
         context['files'].add(normalized)
-        context['mark_scope'](normalized)
+        record_artifact = context.get('record_artifact_discovery')
+        if record_artifact:
+            record_artifact(
+                normalized,
+                page_url,
+                'script-inline' if from_script else 'page-inline',
+                'structured discovery',
+            )
+        context['mark_scope'](normalized, page_url, 'structured-file')
     if '/graphql' in path:
         context['endpoints'].add(posixpath.normpath(urlsplit(normalized).path) or '/graphql')
     if '/api/' in path or path.endswith('/graphql') or path.endswith('/graphiql'):
         context['endpoints'].add(posixpath.normpath(urlsplit(normalized).path) or path)
     if is_link(normalized, context['processed'], context['files']):
-        context['mark_scope'](normalized)
+        context['mark_scope'](normalized, page_url, 'structured-link')

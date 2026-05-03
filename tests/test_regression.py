@@ -17,6 +17,8 @@ from core.checkpoint import load_checkpoint, normalize_checkpoint_sets, save_che
 from core.modes import (
     build_hidden_candidates,
     build_temporal_diffs,
+    coerce_preset,
+    coerce_ritual_chain,
     extract_document_records,
     extract_js_intel,
     extract_location_records,
@@ -24,6 +26,7 @@ from core.modes import (
     extract_story_records,
     extract_thread_records,
 )
+from core.specimen import classify_specimen, resolve_ritual_plan
 from core.politeness import PolitenessController
 from core.utils import (
     extract_headers,
@@ -118,6 +121,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 'const betaCheckoutFlag=true;'
                 'const runtimeConfig={"base":"/api/crypt","token":"sk_live_1234567890abcdef"};'
                 'const routeName="/hidden/panel";'
+                'const view="AdminView";'
+                'const bucket="https://cdn.example-cdn.com/assets/app.js";'
+                'const ga="G-ABC1234";'
+                'const env=process.env.NEXT_PUBLIC_API_URL;'
+                'console.error("ancient stack trace");'
+                '// old admin route retired'
                 '//# sourceMappingURL=/script.js.map',
                 content_type='application/javascript',
             )
@@ -316,6 +325,15 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(is_in_scope('https://api.example.co.uk/path', 'www.example.co.uk', 'example.co.uk', 'domain'))
         self.assertFalse(is_in_scope('https://api.example.co.uk/path', 'www.example.co.uk', 'example.co.uk', 'host'))
 
+    def test_specimen_classifier_and_ritual_plan(self):
+        specimen = classify_specimen('https://web.archive.org/web/20240101000000/https://example.com/login')
+        ritual = resolve_ritual_plan(specimen)
+        self.assertEqual(specimen['type'], 'archived_url')
+        self.assertEqual(specimen['crawl_roots'][0], 'https://example.com/login')
+        self.assertEqual(ritual['ritual_chain'], 'dead_page_resurrection')
+        self.assertEqual(coerce_ritual_chain(ritual['ritual_chain']), 'dead_page_resurrection')
+        self.assertEqual(coerce_preset('quick'), 'quick')
+
     def test_extract_headers_requires_key_value_format(self):
         self.assertEqual(
             extract_headers('X-Test: one\nX-Night: eternal'),
@@ -394,6 +412,36 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(sitemaps, {'https://example.com/sitemap.xml'})
         self.assertEqual(crawl_delay, 3.0)
 
+    def test_seed_from_robots_returns_rule_and_sitemap_metadata(self):
+        internal = set()
+
+        def fake_fetch(url, timeout=8, headers=None, proxies=None):
+            if url.endswith('/robots.txt'):
+                return 'User-agent: *\nAllow: /page\nDisallow: /hidden\nSitemap: https://example.com/sitemap.xml\n'
+            if url.endswith('/sitemap.xml'):
+                return '<urlset><url><loc>https://example.com/page</loc></url></urlset>'
+            return ''
+
+        with patch('core.zap._fetch', side_effect=fake_fetch):
+            robots = set()
+            metadata = zap._seed_from_robots(
+                'https://example.com',
+                False,
+                'example.com',
+                'example.com',
+                internal,
+                robots,
+                [],
+            )
+
+        self.assertIn('https://example.com/page', internal)
+        self.assertEqual(metadata['robots_rules'], [
+            {'directive': 'ALLOW', 'path': '/page'},
+            {'directive': 'DISALLOW', 'path': '/hidden'},
+        ])
+        self.assertIn('https://example.com/sitemap.xml', metadata['sitemap_urls'])
+        self.assertEqual(metadata['sitemap_queued_urls'], ['https://example.com/page'])
+
     def test_checkpoint_round_trip_restores_sets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint = os.path.join(tmpdir, 'crawl.json')
@@ -434,10 +482,16 @@ class RegressionTests(unittest.TestCase):
 
         js_records = extract_js_intel(
             'https://example.com/app.js',
-            'const betaCheckoutFlag=true; const runtimeConfig={"base":"/api"}; const token="sk_live_1234";',
+            'const betaCheckoutFlag=true; const runtimeConfig={"base":"/api"}; const token="sk_live_1234"; '
+            'const view="AdminView"; const gtm="GTM-ABCD12"; const env=process.env.NEXT_PUBLIC_API_URL; '
+            'console.error("old stack"); // ancient route retired',
         )
         self.assertTrue(any('feature=betaCheckoutFlag' in item for item in js_records))
         self.assertTrue(any('config=runtimeConfig' in item for item in js_records))
+        self.assertTrue(any('view=AdminView' in item for item in js_records))
+        self.assertTrue(any('analytics_id=' in item for item in js_records))
+        self.assertTrue(any('env_hint=' in item for item in js_records))
+        self.assertTrue(any('comment=' in item for item in js_records))
 
         thread_records = extract_thread_records(
             'https://example.com/thread',
@@ -716,12 +770,53 @@ class RegressionTests(unittest.TestCase):
                 self.assertIsInstance(exported['stats'], dict)
                 self.assertGreaterEqual(exported['stats']['redirects'], 1)
 
+                with open(os.path.join(output_dir, 'autopsy.json'), 'r', encoding='utf-8') as handle:
+                    autopsy = json.load(handle)
+                self.assertEqual(autopsy['what_the_target_is']['ritual_chain'], 'domain_necropsy')
+                self.assertIn('site_anatomy', autopsy)
+                self.assertIn('mutation_engine', autopsy)
+                self.assertIn('artifact_genealogy', autopsy)
+
+                with open(os.path.join(output_dir, 'site_anatomy.txt'), 'r', encoding='utf-8') as handle:
+                    anatomy = handle.read()
+                self.assertIn('section=auth_surfaces', anatomy)
+                self.assertIn('section=apis', anatomy)
+
+                with open(os.path.join(output_dir, 'mutation_probes.txt'), 'r', encoding='utf-8') as handle:
+                    mutations = handle.read()
+                self.assertIn('/admin', mutations)
+
+                with open(os.path.join(output_dir, 'artifact_genealogy.txt'), 'r', encoding='utf-8') as handle:
+                    genealogy = handle.read()
+                self.assertIn('/report.pdf', genealogy)
+
                 self.assertIn('redirects=', result.stdout)
                 self.assertIn('visited=', result.stdout)
+                self.assertIn('Top types', result.stdout)
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_cli_dry_run_reports_resolved_plan(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(REPO_ROOT, 'vampire.py'),
+                '--target', 'example.com',
+                '--preset', 'quick',
+                '--dry-run',
+            ],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('Dry run', result.stdout)
+        self.assertIn('Specimen type', result.stdout)
+        self.assertIn('Preset', result.stdout)
 
     def test_cli_mode_runs_emit_specialized_datasets(self):
         FixtureHandler.header_failures = []
@@ -873,6 +968,8 @@ class RegressionTests(unittest.TestCase):
             command = build_crawl_command(
                 {
                     'target_url': 'https://example.com',
+                    'target_specimen': 'https://example.com',
+                    'ritual_chain': 'dead_page_resurrection',
                     'mode': 'temporal',
                     'depth': 3,
                     'threads': 6,
@@ -891,10 +988,12 @@ class RegressionTests(unittest.TestCase):
                 checkpoint_path=os.path.abspath(checkpoint),
             )
         rendered = ' '.join(command)
-        self.assertIn('-u https://example.com', rendered)
+        self.assertIn('--target https://example.com', rendered)
         self.assertIn('-l 3', rendered)
         self.assertIn('-t 6', rendered)
         self.assertIn('--scope domain', rendered)
+        self.assertIn('--ritual-chain dead_page_resurrection', rendered)
+        self.assertIn('--preset balanced', rendered)
         self.assertIn('--mode temporal', rendered)
         self.assertIn('--respect-robots-delay', rendered)
         self.assertIn('--render-js', rendered)
@@ -916,6 +1015,34 @@ class RegressionTests(unittest.TestCase):
             (output_dir / 'intel.txt').write_text('https://example.com:EMAIL:test@example.com\n', encoding='utf-8')
             (output_dir / 'failed.txt').write_text('https://example.com/admin\n', encoding='utf-8')
             (output_dir / 'stats.txt').write_text('visited=2\nfailures=1\nredirects=0\n', encoding='utf-8')
+            checkpoint.write_text(json.dumps({
+                'version': 1,
+                'queue_state': {
+                    'pending': ['https://example.com/contact'],
+                    'active': ['https://example.com/about'],
+                    'completed': ['https://example.com/'],
+                    'skipped': ['https://example.com/report.pdf'],
+                },
+                'crawl_records': {
+                    'https://example.com/': {
+                        'url': 'https://example.com/',
+                        'status_code': 200,
+                        'content_type': 'text/html',
+                        'depth': 1,
+                        'source_page': 'seed',
+                        'discovery_time': 1,
+                        'state': 'completed',
+                    },
+                },
+                'robots_metadata': {
+                    'rules': [{'directive': 'DISALLOW', 'path': '/hidden'}],
+                    'crawl_delay': 1,
+                },
+                'sitemap_metadata': {
+                    'sitemap_urls': ['https://example.com/sitemap.xml'],
+                    'queued_urls': ['https://example.com/about'],
+                },
+            }), encoding='utf-8')
             manager.current_run = CrawlRun(
                 run_id='sealed-record',
                 payload={'target_url': 'https://example.com', 'depth': 2, 'threads': 4, 'mode': 'document'},
@@ -937,12 +1064,21 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(state_data['summary']['document_tombs'], 1)
                 self.assertEqual(state_data['summary']['mail_sigils'], 1)
                 self.assertTrue(any(panel['key'] == 'documents' for panel in state_data['panels']))
-                self.assertTrue(any(item['kind'] == 'report' for item in state_data['exports']))
+                self.assertTrue(any(item['kind'] == 'autopsy-md' for item in state_data['exports']))
+                self.assertTrue(any(item['kind'] == 'bundle' for item in state_data['exports']))
+                self.assertEqual(state_data['queue']['pending']['count'], 1)
+                self.assertEqual(state_data['robots_details']['crawl_delay'], 1)
+                self.assertEqual(state_data['sitemap_details']['sitemap_urls'], ['https://example.com/sitemap.xml'])
+                self.assertEqual(state_data['result_rows'][0]['source_page'], 'seed')
 
-                report_response = client.get('/api/exports/report')
-                self.assertEqual(report_response.status_code, 200)
-                self.assertIn('SEALED RECORD', report_response.get_data(as_text=True))
-                report_response.close()
+                autopsy_response = client.get('/api/exports/autopsy-md')
+                self.assertEqual(autopsy_response.status_code, 200)
+                self.assertIn('Vampiric Crawler Autopsy', autopsy_response.get_data(as_text=True))
+                autopsy_response.close()
+
+                bundle_response = client.get('/api/exports/bundle')
+                self.assertEqual(bundle_response.status_code, 200)
+                bundle_response.close()
 
 
 if __name__ == '__main__':

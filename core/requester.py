@@ -5,6 +5,7 @@ import time
 import warnings
 
 import requests
+from requests import exceptions as requests_exceptions
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -33,7 +34,7 @@ class RequestResult(object):
 
     def __init__(self, url, final_url=None, text='', status_code=None,
                  content_type='', error=None, redirect_chain=None,
-                 skip_reason=None, headers=None):
+                 skip_reason=None, headers=None, error_kind='', error_message=''):
         self.url = url
         self.final_url = final_url or url
         self.text = text or ''
@@ -43,6 +44,8 @@ class RequestResult(object):
         self.redirect_chain = tuple(redirect_chain or ())
         self.skip_reason = skip_reason
         self.headers = dict(headers or {})
+        self.error_kind = error_kind
+        self.error_message = error_message or error or ''
 
     @property
     def ok(self):
@@ -158,6 +161,8 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 redirect_chain=redirect_chain,
                 error='client-error',
                 headers=resp.headers,
+                error_kind='blocked' if status_code in (401, 403, 429) else 'client-error',
+                error_message='Request blocked by the target.' if status_code in (401, 403, 429) else f'Request failed with status {status_code}.',
             )
 
         if status_code >= 500:
@@ -175,6 +180,8 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 redirect_chain=redirect_chain,
                 error='server-error',
                 headers=resp.headers,
+                error_kind='server-error',
+                error_message=f'Server returned status {status_code}.',
             )
 
         if stats:
@@ -195,6 +202,8 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 redirect_chain=redirect_chain,
                 skip_reason=skip_reason,
                 headers=resp.headers,
+                error_kind='unsupported-content-type',
+                error_message=f'Unsupported content type: {content_type or "unknown"}.',
             )
 
         text = resp.text
@@ -210,6 +219,8 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
                 redirect_chain=redirect_chain,
                 skip_reason='empty-response',
                 headers=resp.headers,
+                error_kind='empty-response',
+                error_message='Response body was empty.',
             )
 
         if core.config.verbose:
@@ -237,7 +248,25 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
             stats.bump('failures')
         if core.config.verbose:
             print(f'{coffin}Failed to feed on {url} — {exc}')
-        return RequestResult(url, error=str(exc))
+        error_kind, error_message = classify_request_exception(exc)
+        return RequestResult(url, error=str(exc), error_kind=error_kind, error_message=error_message)
     finally:
         if policy is not None and host_token is not None:
             policy.release(host_token)
+
+
+def classify_request_exception(exc):
+    """Return a stable `(kind, message)` pair for request exceptions."""
+    if isinstance(exc, requests_exceptions.Timeout):
+        return 'timeout', 'Request timed out before the prey answered.'
+    if isinstance(exc, requests_exceptions.SSLError):
+        return 'ssl', 'SSL/TLS negotiation failed.'
+    if isinstance(exc, requests_exceptions.InvalidURL):
+        return 'invalid-url', 'The target URL is invalid.'
+    if isinstance(exc, requests_exceptions.InvalidSchema):
+        return 'invalid-url', 'The target URL uses an unsupported schema.'
+    if isinstance(exc, requests_exceptions.ProxyError):
+        return 'blocked', 'The proxy chain blocked or rejected the request.'
+    if isinstance(exc, requests_exceptions.ConnectionError):
+        return 'blocked', 'The connection was refused or blocked.'
+    return 'request-error', str(exc)

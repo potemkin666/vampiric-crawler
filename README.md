@@ -9,7 +9,8 @@ Vampiric Crawler is a Photon-inspired OSINT crawler with a gothic accent: fast e
 - Seeds from robots rules, recursive sitemaps, and archive providers
 - Supports persistent HTTP sessions with retries, adaptive backoff, robots crawl-delay, checkpoint/resume, and optional JS rendering
 - Collects predictable datasets for tooling and follow-up analysis
-- Exports loot as plain text, JSON, or CSV
+- Exports loot as plain text, JSON, CSV, plus a final `autopsy.json` and `autopsy.md`
+- Classifies target specimens and can choose ritual-chain workflows automatically
 
 ## Datasets
 
@@ -100,6 +101,12 @@ If you double-click the crawler launcher instead of passing flags in a terminal:
 ## Usage
 
 ```bash
+python vampire.py --target <SPECIMEN> [options]
+```
+
+Backward-compatible URL entry still works:
+
+```bash
 python vampire.py -u <URL> [options]
 ```
 
@@ -108,6 +115,10 @@ python vampire.py -u <URL> [options]
 | Flag | Description | Default |
 |---|---|---|
 | `-u`, `--url` | Target URL | required |
+| `--target` | Target specimen such as URL, domain, JS/PDF path, or pasted HTML | none |
+| `--input-kind` | Force specimen classification | `auto` |
+| `--ritual-chain` | Higher-level workflow above low-level modes | auto |
+| `--preset` | Preset crawl profile (`quick`, `balanced`, `polite`, `document-heavy`, `javascript-heavy`) | `balanced` |
 | `-l`, `--level` | Crawl depth | `2` |
 | `-t`, `--threads` | Worker threads | `4` |
 | `-d`, `--delay` | Delay between requests in seconds | `0` |
@@ -120,6 +131,8 @@ python vampire.py -u <URL> [options]
 | `-s`, `--seeds` | Additional seed URLs | none |
 | `--exclude` | Exclude URLs matching a regex | none |
 | `-o`, `--output` | Output directory | target host |
+| `--dry-run` | Show the resolved crawl plan without making requests | off |
+| `--setup-check` | Verify Python dependencies and Playwright browser availability, then exit | off |
 | `-v`, `--verbose` | Verbose crawl output | off |
 
 ### Request and network options
@@ -158,7 +171,19 @@ python vampire.py -u <URL> [options]
 Basic crawl:
 
 ```bash
-python vampire.py -u https://example.com
+python vampire.py --target https://example.com
+```
+
+Dry-run a specimen with preset defaults:
+
+```bash
+python vampire.py --target example.com --preset quick --dry-run
+```
+
+Analyze a direct JS specimen:
+
+```bash
+python vampire.py --target /tmp/app.js --input-kind js
 ```
 
 Domain-wide crawl with retries, custom headers, and JSON export:
@@ -221,6 +246,8 @@ example.com/
 ├── redirects.txt
 ├── results.csv
 ├── results.json
+├── autopsy.json
+├── autopsy.md
 ├── robots.txt
 ├── scripts.txt
 ├── skipped.txt
