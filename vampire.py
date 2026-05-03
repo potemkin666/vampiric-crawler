@@ -650,7 +650,7 @@ if not only_urls:
         flash(jscanner, scripts, thread_count)
         write_checkpoint('scripts-scanned')
     elif scripts and mode == 'document':
-        print(f'{crypt}Document harvester ignores script bones and keeps feeding on parchments only.')
+        print(f'{crypt}Document harvester mode skips JavaScript analysis so it can focus on document extraction.')
 
     for url in internal:
         fuzzable_url = normalize_fuzzable_url(url)

@@ -331,7 +331,7 @@ def build_temporal_diffs(previous_snapshot: dict[str, object], current_snapshot:
     for name in sorted(dataset_names):
         previous = previous_snapshot.get(name)
         current = current_snapshot.get(name)
-        if isinstance(previous, dict) or isinstance(current, dict):
+        if any(isinstance(value, dict) for value in (previous, current)):
             previous = previous or {}
             current = current or {}
             keys = set(previous) | set(current)

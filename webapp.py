@@ -116,6 +116,10 @@ def mode_description(mode: str) -> str:
     return MODE_DEFINITIONS.get(coerce_mode(mode), MODE_DEFINITIONS['generic'])['description']
 
 
+def count_unique_scam_signal_types(items: list[str]) -> int:
+    return len({item.split(' signal=', 1)[-1].split(' ', 1)[0] for item in items})
+
+
 def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_path: Path) -> list[str]:
     target_url = (payload.get('target_url') or '').strip()
     if not target_url:
@@ -359,7 +363,7 @@ def build_summary_cards(mode: str, datasets: dict[str, list[str]], stats: dict[s
         ],
         'scam': [
             {'label': 'HEXES', 'value': len(datasets.get('scam_signals', []))},
-            {'label': 'RUSES', 'value': len({item.split(' signal=', 1)[-1].split(' ', 1)[0] for item in datasets.get('scam_signals', [])})},
+            {'label': 'RUSES', 'value': count_unique_scam_signal_types(datasets.get('scam_signals', []))},
         ],
         'temporal': [
             {'label': 'DIFFS', 'value': len(datasets.get('temporal_diffs', []))},
