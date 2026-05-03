@@ -224,10 +224,6 @@ class RegressionTests(unittest.TestCase):
     def test_launch_script_prompts_for_url_when_started_without_args(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             launcher_path = self._write_test_launcher(tmpdir)
-
-            with open(os.path.join(tmpdir, 'vampire.py'), 'w', encoding='utf-8') as handle:
-                handle.write('print("stub vampire")\n')
-
             bin_dir = self._write_python_stub(
                 tmpdir,
                 '#!/usr/bin/env bash\n'
