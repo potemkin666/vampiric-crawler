@@ -469,7 +469,7 @@ class CrawlManager:
             if payload['mode'] == 'temporal' and not payload.get('temporal_baseline'):
                 baseline = self._latest_baseline(payload.get('target_url', ''))
                 if baseline is not None:
-                    payload['temporal_baseline'] = str(baseline)
+                    payload['temporal_baseline'] = str(baseline.resolve())
             run_id = f'{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}-{slugify_target(payload.get("target_url", ""))}-{uuid.uuid4().hex[:6]}'
             output_dir = self.runs_root / run_id
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -534,12 +534,12 @@ class CrawlManager:
             ensure_exports(run)
         self.history.appendleft({
             'id': run.run_id,
-                'target_url': run.payload.get('target_url', ''),
-                'mode': coerce_mode(run.payload.get('mode')),
-                'ended_at': run.ended_at,
-                'status': run.status,
-                'status_message': STATUS_MESSAGES.get(run.status, STATUS_MESSAGES['idle']),
-            })
+            'target_url': run.payload.get('target_url', ''),
+            'mode': coerce_mode(run.payload.get('mode')),
+            'ended_at': run.ended_at,
+            'status': run.status,
+            'status_message': STATUS_MESSAGES.get(run.status, STATUS_MESSAGES['idle']),
+        })
 
     def pause(self) -> CrawlRun:
         run = self._active_run()

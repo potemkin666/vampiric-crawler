@@ -9,46 +9,55 @@ const MODE_CONFIG = {
     label: 'GENERIC HUNT',
     description: 'Balanced reconnaissance across pages, forms, scripts, and relics.',
     flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns'],
+    force: {},
   },
   document: {
     label: 'DOCUMENT HARVESTER',
     description: 'Exhume PDF and office tombs for metadata, authors, internal paths, and mail leaks.',
     flags: ['scope', 'intel', 'robots', 'archive'],
+    force: { render: false },
   },
   'js-intel': {
     label: 'JS INTELLIGENCE',
     description: 'Read occult JavaScript sigils for hidden routes, tokens, feature flags, and config relics.',
     flags: ['scope', 'secrets', 'robots', 'render', 'archive'],
+    force: { secrets: true },
   },
   forum: {
     label: 'THREAD NECROMANCY',
     description: 'Reanimate conversations through replies, quotes, and deleted-user shadows.',
     flags: ['scope', 'intel', 'robots', 'render'],
+    force: {},
   },
   geo: {
     label: 'GEO-INTELLIGENCE',
     description: 'Collect coordinates, place names, and geo tags into map-ready blood trails.',
     flags: ['scope', 'intel', 'robots', 'render'],
+    force: {},
   },
   news: {
     label: 'NEWS PROPAGATION',
     description: 'Follow one story through outlets, tongues, regions, and mutations.',
     flags: ['scope', 'robots', 'render', 'archive'],
+    force: {},
   },
   hidden: {
     label: 'SHADOW GATE HUNT',
     description: 'Blend learned paths with a bounded wordlist to find sealed routes and hidden doors.',
     flags: ['scope', 'robots', 'archive'],
+    force: {},
   },
   scam: {
     label: 'SCAM / DARK PATTERN',
     description: 'Flag fake urgency, coercive funnels, cloned trust marks, and cursed checkout flows.',
     flags: ['scope', 'intel', 'robots', 'render'],
+    force: {},
   },
   temporal: {
     label: 'TEMPORAL CHANGE',
     description: 'Compare the current harvest against an older night and mark what shifted in silence.',
     flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns'],
+    force: {},
   },
 };
 
@@ -128,8 +137,12 @@ function syncModeControls() {
   document.querySelectorAll('[data-flag]').forEach((node) => {
     node.classList.toggle('is-hidden', !config.flags.includes(node.dataset.flag));
   });
-  if (els.crawlMode.value === 'js-intel') els.extractSecrets.checked = true;
-  if (els.crawlMode.value === 'document') els.renderJs.checked = false;
+  if (Object.prototype.hasOwnProperty.call(config.force, 'secrets')) {
+    els.extractSecrets.checked = config.force.secrets;
+  }
+  if (Object.prototype.hasOwnProperty.call(config.force, 'render')) {
+    els.renderJs.checked = config.force.render;
+  }
   renderCommandPreview();
 }
 

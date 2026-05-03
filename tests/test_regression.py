@@ -332,6 +332,27 @@ class RegressionTests(unittest.TestCase):
             self.assertIn('internal,https://example.com', content)
             self.assertIn('stats,visited=1', content)
 
+    def test_fixture_handler_send_accepts_binary_payloads(self):
+        server = ThreadedHTTPServer(('127.0.0.1', 0), FixtureHandler)
+        server.base_url = 'http://127.0.0.1:{}'.format(server.server_port)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+        try:
+            response = subprocess.run(
+                ['python3', '-c', f'import urllib.request;print(urllib.request.urlopen("{server.base_url}/report.pdf").read()[:8].decode("latin1"))'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(response.returncode, 0, msg=response.stderr)
+            self.assertIn('%PDF-1.4', response.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_archive_seeding_collects_from_multiple_sources(self):
         def fake_fetch(url, timeout=8, headers=None, proxies=None):
             parsed = urlsplit(url)

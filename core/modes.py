@@ -17,11 +17,11 @@ MODE_DEFINITIONS = {
     },
     'document': {
         'label': 'Document harvester',
-        'description': 'Prioritize linked office documents and extract metadata, authors, paths, and email leaks.',
+        'description': 'Prioritize linked office documents and extract metadata, authors, paths, and email leaks; depth never falls below one layer.',
     },
     'js-intel': {
         'label': 'JS intelligence crawler',
-        'description': 'Expand script analysis to extract routes, tokens, feature flags, source maps, and config blobs.',
+        'description': 'Expand script analysis to extract routes, tokens, feature flags, source maps, and config blobs; secret hunting is forced on.',
     },
     'forum': {
         'label': 'Forum/thread deep crawler',
@@ -141,7 +141,7 @@ def extract_document_records(document_url: str, payload: bytes, content_type: st
 
     if lowered_path.endswith('.pdf') or 'pdf' in kind:
         for key in ('Title', 'Author', 'Creator', 'Producer', 'Subject', 'CreationDate'):
-            match = re.search(r'/{0}\s*\((.*?)\)'.format(re.escape(key)), text)
+            match = re.search(rf'/{re.escape(key)}\s*\((.*?)\)', text)
             if match:
                 metadata.add(f'url={document_url} type=pdf {key.lower()}={match.group(1).strip()}')
     elif lowered_path.endswith(('.docx', '.xlsx', '.pptx', '.odt', '.ods', '.odp')):
@@ -197,7 +197,7 @@ def extract_js_intel(script_url: str, response: str) -> set[str]:
     for name, value in JS_TOKEN_RE.findall(response):
         findings.add(f'script={script_url} token={name} value={value}')
     for name, value in JS_FEATURE_RE.findall(response):
-        findings.add(f'script={script_url} feature={name} value={value.strip(chr(34)).strip(chr(39))}')
+        findings.add(f'script={script_url} feature={name} value={value.strip("\"").strip("\'")}')
     for name, value in JS_CONFIG_RE.findall(response):
         compact = re.sub(r'\s+', ' ', value)
         findings.add(f'script={script_url} config={name} value={compact[:220]}')
