@@ -23,6 +23,7 @@ import sys
 import time
 import warnings
 import random
+from html.parser import HTMLParser
 
 # Silence SSL warnings — creatures of the night care not for certificates
 warnings.filterwarnings('ignore')
@@ -248,6 +249,34 @@ suppress_regex = False
 
 # ── Core extraction functions ──────────────────────────────────────────────────
 
+
+class VisibleTextExtractor(HTMLParser):
+    """Collect text while ignoring script/style blocks."""
+
+    def __init__(self):
+        super().__init__()
+        self._skip_depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('script', 'style'):
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style') and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if not self._skip_depth and data.strip():
+            self.parts.append(data)
+
+
+def extract_visible_text(response):
+    """Return visible text content from an HTML response."""
+    parser = VisibleTextExtractor()
+    parser.feed(response)
+    return ' '.join(parser.parts)
+
 def mark_scope(url):
     """Record *url* as internal or external based on scope."""
     normalized = normalize_url(url, base_url=main_url)
@@ -296,8 +325,7 @@ def record_request_outcome(url, result, purpose):
 
 def intel_extractor(url, response):
     """Sift through the victim's response for secrets."""
-    res = re.sub(r'<script\b[^>]*>.*?</script\s*>', '', response, flags=re.I | re.S)
-    res = re.sub(r'<[^<]+?>', '', res)
+    res = extract_visible_text(response)
     for name, pattern in rintels:
         for match in pattern.findall(res):
             verb('Intel', match)
@@ -346,7 +374,7 @@ def first_secret_group(match):
     if isinstance(match, str):
         return match.strip()
     for item in match:
-        if item:
+        if item is not None and item != '':
             return item.strip()
     return ''
 

@@ -113,7 +113,7 @@ def normalize_query_string(query):
     if not query:
         return ''
     pairs = parse_qsl(query, keep_blank_values=True)
-    pairs.sort(key=lambda item: (item[0], item[1]))
+    pairs.sort()
     return urlencode(pairs, doseq=True)
 
 
@@ -194,7 +194,8 @@ def is_in_scope(url, host, domain, scope='host'):
 def verb(label, value):
     """Print a verbose message if verbose mode is on."""
     if core.config.verbose:
-        print(f'{crypt}{label}: {value}')
+        display_value = '[redacted]' if label in ('Key', 'Header') else value
+        print(f'{crypt}{label}: {display_value}')
 
 
 # ---------------------------------------------------------------------------

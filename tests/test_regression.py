@@ -185,6 +185,8 @@ class RegressionTests(unittest.TestCase):
                     fuzzable = handle.read().strip().splitlines()
                 dup_fuzzables = [line for line in fuzzable if '/dup?' in line]
                 self.assertEqual(dup_fuzzables, [server.base_url + '/dup?a=&b='])
+                self.assertNotIn(server.base_url + '/dup?a=1&b=2', fuzzable)
+                self.assertNotIn(server.base_url + '/dup?a=9&b=8', fuzzable)
 
                 with open(os.path.join(output_dir, 'keys.txt'), 'r', encoding='utf-8') as handle:
                     keys = handle.read()
