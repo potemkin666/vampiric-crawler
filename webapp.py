@@ -517,6 +517,11 @@ def create_app(runs_root: Path | None = None) -> Flask:
     manager = CrawlManager(runs_root or RUNS_ROOT)
     app.config['CRAWL_MANAGER'] = manager
 
+    def error_response(message: str, status_code: int, exc: Exception | None = None) -> Any:
+        if exc is not None:
+            app.logger.warning('%s: %s', message, exc)
+        return jsonify({'error': message}), status_code
+
     @app.get('/')
     def index() -> str:
         return render_template('index.html')
@@ -531,9 +536,9 @@ def create_app(runs_root: Path | None = None) -> Flask:
         try:
             run = app.config['CRAWL_MANAGER'].start(payload)
         except ValueError as exc:
-            return jsonify({'error': str(exc)}), 400
+            return error_response('The target command is malformed.', 400, exc)
         except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 409
+            return error_response('Another crawl rite is already active.', 409, exc)
         return jsonify(run.snapshot(list(app.config['CRAWL_MANAGER'].history))), 202
 
     @app.post('/api/crawl/pause')
@@ -541,7 +546,7 @@ def create_app(runs_root: Path | None = None) -> Flask:
         try:
             run = app.config['CRAWL_MANAGER'].pause()
         except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 409
+            return error_response('The rite cannot be paused right now.', 409, exc)
         return jsonify(run.snapshot(list(app.config['CRAWL_MANAGER'].history)))
 
     @app.post('/api/crawl/resume')
@@ -549,7 +554,7 @@ def create_app(runs_root: Path | None = None) -> Flask:
         try:
             run = app.config['CRAWL_MANAGER'].resume()
         except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 409
+            return error_response('The rite cannot be resumed right now.', 409, exc)
         return jsonify(run.snapshot(list(app.config['CRAWL_MANAGER'].history)))
 
     @app.post('/api/crawl/stop')
@@ -557,7 +562,7 @@ def create_app(runs_root: Path | None = None) -> Flask:
         try:
             run = app.config['CRAWL_MANAGER'].stop()
         except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 409
+            return error_response('The rite cannot be halted right now.', 409, exc)
         return jsonify(run.snapshot(list(app.config['CRAWL_MANAGER'].history)))
 
     @app.get('/api/exports/<kind>')
