@@ -991,10 +991,11 @@ if mode == 'temporal':
         previous_snapshot = load_previous_snapshot(baseline_dir)
     elif snapshot_exists(output_dir):
         previous_snapshot = load_previous_snapshot(output_dir)
+artifact_genealogy_placeholder = set()
 datasets = [
     files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
     document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
-    site_anatomy, mutation_probes, set(),
+    site_anatomy, mutation_probes, artifact_genealogy_placeholder,
 ]
 if mode == 'temporal' and previous_snapshot:
     current_snapshot = {

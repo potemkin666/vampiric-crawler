@@ -40,6 +40,7 @@ SPECIMEN_TO_RITUAL = {
     'handle': 'scam_smell_test',
 }
 ALLOWED_LOCAL_SUFFIXES = frozenset(('.js', '.mjs', '.cjs', '.pdf', '.html', '.htm'))
+ALLOWED_LOCAL_ROOTS = (Path.cwd(), Path('/tmp'))
 
 
 def classify_specimen(raw_value: str | None, explicit_kind: str | None = None) -> dict[str, object]:
@@ -264,6 +265,9 @@ def _normalize_local_path(raw: str) -> str:
     except OSError:
         return ''
     if not resolved.is_file():
+        return ''
+    allowed_roots = [root.resolve() for root in ALLOWED_LOCAL_ROOTS if root.exists()]
+    if allowed_roots and not any(os.path.commonpath([str(resolved), str(root)]) == str(root) for root in allowed_roots):
         return ''
     return str(resolved)
 

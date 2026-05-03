@@ -334,7 +334,7 @@ def render_autopsy_markdown(autopsy: dict[str, object]) -> str:
         f'- Pages crawled: {summary.get("pages_crawled", 0)}',
         f'- Skipped: {summary.get("skipped", 0)}',
         f'- Failed: {summary.get("failed", 0)}',
-        f'- Duration (s): {summary.get("duration_seconds", 0):.2f}',
+        f'- Duration (s): {float(summary.get("duration_seconds") or 0):.2f}',
         '',
         '## Site anatomy',
     ]
