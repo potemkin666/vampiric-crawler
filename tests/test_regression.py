@@ -7,7 +7,9 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
+from unittest.mock import patch
 
+from core import zap
 from core.utils import (
     extract_headers,
     is_in_scope,
@@ -80,6 +82,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self._send(200, 'const api="/api/crypt";', content_type='application/javascript')
         elif self.path == '/submit':
             self._send(200, '<html><body>submitted</body></html>')
+        elif self.path == '/hidden':
+            self._send(200, '<html><body>hidden chamber</body></html>')
+        elif self.path == '/sitemap-only':
+            self._send(200, '<html><body>sitemap only</body></html>')
+        elif self.path == '/sitemap-deep':
+            self._send(200, '<html><body>sitemap deep</body></html>')
         elif self.path == '/flaky':
             FixtureHandler.flaky_hits += 1
             if FixtureHandler.flaky_hits < 3:
@@ -87,9 +95,42 @@ class FixtureHandler(BaseHTTPRequestHandler):
             else:
                 self._send(200, '<html><body>stable now</body></html>')
         elif self.path == '/robots.txt':
-            self._send(200, 'Allow: /page\nAllow: /flaky\n', content_type='text/plain')
+            body = (
+                'User-agent: OtherBot\n'
+                'Disallow: /other-only\n\n'
+                'User-agent: *\n'
+                'Allow: /page\n'
+                'Allow: /flaky\n'
+                'Disallow: /hidden\n'
+                'Sitemap: {}/sitemap.xml\n'.format(base_url)
+            )
+            self._send(200, body, content_type='text/plain')
         elif self.path == '/sitemap.xml':
-            body = '<urlset><url><loc>{}/redirect</loc></url></urlset>'.format(base_url)
+            body = (
+                '<sitemapindex>'
+                '<sitemap><loc>{}/nested-sitemap.xml</loc></sitemap>'
+                '<sitemap><loc>{}/loop-sitemap.xml</loc></sitemap>'
+                '</sitemapindex>'
+            ).format(base_url, base_url)
+            self._send(200, body, content_type='application/xml')
+        elif self.path == '/nested-sitemap.xml':
+            body = (
+                '<urlset>'
+                '<url><loc>{}/redirect</loc></url>'
+                '<url><loc>{}/sitemap-only</loc></url>'
+                '</urlset>'
+            ).format(base_url, base_url)
+            self._send(200, body, content_type='application/xml')
+        elif self.path == '/loop-sitemap.xml':
+            body = (
+                '<sitemapindex>'
+                '<sitemap><loc>{}/sitemap.xml</loc></sitemap>'
+                '<sitemap><loc>{}/deep-sitemap.xml</loc></sitemap>'
+                '</sitemapindex>'
+            ).format(base_url, base_url)
+            self._send(200, body, content_type='application/xml')
+        elif self.path == '/deep-sitemap.xml':
+            body = '<urlset><url><loc>{}/sitemap-deep</loc></url></urlset>'.format(base_url)
             self._send(200, body, content_type='application/xml')
         else:
             self._send(404, 'missing', content_type='text/plain')
@@ -126,6 +167,36 @@ class RegressionTests(unittest.TestCase):
                 content = handle.read()
             self.assertIn('internal,https://example.com', content)
             self.assertIn('stats,visited=1', content)
+
+    def test_archive_seeding_collects_from_multiple_sources(self):
+        def fake_fetch(url, timeout=8, headers=None, proxies=None):
+            if url == 'https://index.commoncrawl.org/collinfo.json':
+                return json.dumps([
+                    {'id': 'CC-MAIN-2025-18'},
+                    {'id': 'CC-MAIN-2025-13'},
+                ])
+            if 'web.archive.org' in url and '*.example.com' in url:
+                return 'https://cdn.example.com/file\n'
+            if 'web.archive.org' in url and 'app.example.com' in url:
+                return 'https://app.example.com/alpha\nhttps://app.example.com/beta?b=2&a=1\n'
+            if 'web.archive.org' in url and 'example.com' in url:
+                return 'https://example.com/root\n'
+            if 'CC-MAIN-2025-18-index' in url and 'app.example.com' in url:
+                return '\n'.join([
+                    json.dumps({'url': 'https://app.example.com/beta?a=1&b=2'}),
+                    json.dumps({'url': 'https://app.example.com/gamma'}),
+                ])
+            return ''
+
+        internal = set()
+        with patch('core.zap._fetch', side_effect=fake_fetch):
+            zap._archives('example.com', 'app.example.com', internal)
+
+        self.assertIn('https://app.example.com/alpha', internal)
+        self.assertIn('https://app.example.com/beta?a=1&b=2', internal)
+        self.assertIn('https://app.example.com/gamma', internal)
+        self.assertIn('https://example.com/root', internal)
+        self.assertIn('https://cdn.example.com/file', internal)
 
     def test_cli_regression_for_headers_stats_redirects_forms_and_exports(self):
         FixtureHandler.header_failures = []
@@ -170,6 +241,18 @@ class RegressionTests(unittest.TestCase):
                     redirects = handle.read()
                 self.assertIn('/redirect', redirects)
                 self.assertIn('/landing', redirects)
+
+                with open(os.path.join(output_dir, 'robots.txt'), 'r', encoding='utf-8') as handle:
+                    robots = handle.read()
+                self.assertIn('/hidden', robots)
+                self.assertNotIn('/other-only', robots)
+
+                with open(os.path.join(output_dir, 'internal.txt'), 'r', encoding='utf-8') as handle:
+                    internal = handle.read()
+                self.assertIn('/hidden', internal)
+                self.assertIn('/sitemap-only', internal)
+                self.assertIn('/sitemap-deep', internal)
+                self.assertNotIn('/other-only', internal)
 
                 with open(os.path.join(output_dir, 'skipped.txt'), 'r', encoding='utf-8') as handle:
                     skipped = handle.read()

@@ -130,7 +130,7 @@ parser.add_argument('--dns',
                     help='Enumerate subdomains and dump DNS data',
                     dest='dns', action='store_true')
 parser.add_argument('--wayback',
-                    help='Fetch archived URLs from archive.org as extra seeds',
+                    help='Fetch archived URLs from archive sources as extra seeds',
                     dest='archive', action='store_true')
 parser.add_argument('--only-urls',
                     help='Only harvest URLs, skip intel extraction',

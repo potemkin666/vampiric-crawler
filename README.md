@@ -6,6 +6,7 @@ Vampiric Crawler is a Photon-inspired OSINT crawler with a gothic accent: fast e
 
 - Crawls a target with configurable depth, threads, delay, timeout, headers, cookies, proxies, and user-agent rotation
 - Normalizes URLs so duplicate paths, query ordering, and redirect trails stay predictable
+- Seeds from robots rules, recursive sitemaps, and archive providers
 - Supports persistent HTTP sessions with retries
 - Collects predictable datasets for tooling and follow-up analysis
 - Exports loot as plain text, JSON, or CSV
@@ -25,7 +26,7 @@ The crawler writes one text file per populated dataset and can also export the s
 | `files` | Static assets that were linked but not crawled as pages |
 | `scripts` | JavaScript files in scope |
 | `endpoints` | Paths extracted from JavaScript |
-| `robots` | `robots.txt` entries |
+| `robots` | Applicable `robots.txt` rules plus discovered sitemap hints |
 | `custom` | Matches from `-r/--regex` |
 | `failed` | Requests that failed |
 | `skipped` | Responses skipped before extraction |
@@ -92,7 +93,7 @@ python vampire.py -u <URL> [options]
 |---|---|
 | `--keys` | Enable secret detection |
 | `--dns` | Enumerate common subdomains |
-| `--wayback` | Seed from the Wayback Machine |
+| `--wayback` | Seed from archive providers such as Wayback and Common Crawl |
 | `--only-urls` | Skip non-URL extraction |
 | `-r`, `--regex` | Custom regex for extra extraction |
 
@@ -169,6 +170,7 @@ example.com/
 - URLs are canonicalized before being queued, classified, and exported
 - Fuzzable URLs are normalized to stable parameter-key sets
 - Redirects, status handling, and content-type checks happen before extraction
+- Robots rules are parsed by user-agent group, sitemap indexes recurse with loop protection, and archive seeding is bounded
 - Scope is explicit:
   - `host`: stay on the exact host
   - `domain`: allow the full registered domain, including subdomains
