@@ -119,7 +119,7 @@ def _parse_robot_groups(body):
 
 
 def _applicable_robot_rules(body):
-    """Return applicable robots paths plus discovered sitemap URLs."""
+    """Return applicable robots rules, sitemap URLs, and crawl-delay seconds."""
     groups, sitemaps = _parse_robot_groups(body)
     matched = []
     best_score = -1
