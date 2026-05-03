@@ -47,21 +47,34 @@ cd /d "%SCRIPT_DIR%"
 if "%~1"=="" (
     set "INTERACTIVE_LAUNCH=1"
     echo.
-    set /p TARGET_URL=Enter target URL (for example https://example.com): 
+    echo [🦇] Double-click mode detected.
+    echo [🦇] Paste the full target URL below, then press Enter to start the crawl.
+    echo [🦇] Example: https://example.com
+    echo.
+    set /p TARGET_URL=Target URL: 
     call :trim_variable TARGET_URL
     if not defined TARGET_URL (
         echo [☠] No prey specified. Closing the coffin.
-        pause
+        echo [🦇] Press any key to close this window.
+        pause >nul
         exit /b 1
     )
+    echo.
+    echo [🦇] Launching crawl against "%TARGET_URL%"...
     %PYTHON% "%APP%" -u "%TARGET_URL%"
 ) else (
     %PYTHON% "%APP%" %*
 )
 
 set "EXITCODE=%errorlevel%"
-if not "%EXITCODE%"=="0" if defined INTERACTIVE_LAUNCH (
-    pause
+if defined INTERACTIVE_LAUNCH (
+    echo.
+    if "%EXITCODE%"=="0" (
+        echo [🦇] Crawl finished. Press any key to close this window.
+    ) else (
+        echo [☠] Crawl failed with exit code %EXITCODE%. Press any key to close this window.
+    )
+    pause >nul
 )
 exit /b %EXITCODE%
 
