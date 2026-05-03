@@ -18,8 +18,15 @@ PAGE_EXTRACTORS = []
 SCRIPT_EXTRACTORS = []
 
 
-INLINE_URL_RE = re.compile(r'["\']((?:https?://|//|/|\.\./|\./)[^"\'<>\s]{1,300})["\']', re.I)
-INLINE_PATH_RE = re.compile(r'["\']((?:/|\.\./|\./)(?:api|graphql|graphiql|playground|openapi|swagger|assets?|static|manifest)[^"\'<>\s]{0,300})["\']', re.I)
+INLINE_REFERENCE_LIMIT = 300
+INLINE_URL_RE = re.compile(
+    rf'["\']((?:https?://|//|/|\.\./|\./)[^"\'<>\s]{{1,{INLINE_REFERENCE_LIMIT}}})["\']',
+    re.I,
+)
+INLINE_PATH_RE = re.compile(
+    rf'["\']((?:/|\.\./|\./)(?:api|graphql|graphiql|playground|openapi|swagger|assets?|static|manifest)[^"\'<>\s]{{0,{INLINE_REFERENCE_LIMIT}}})["\']',
+    re.I,
+)
 GRAPHQL_HINT_RE = re.compile(r'(?:https?://[^\s"\']+)?/(?:api/)?graphql(?:\b|/)', re.I)
 SOURCE_MAP_RE = re.compile(r'[#@]\s*sourceMappingURL\s*=\s*([^\s]+)', re.I)
 

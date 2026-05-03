@@ -171,13 +171,19 @@ class FixtureHandler(BaseHTTPRequestHandler):
         return
 
 
+
+
+class FakeResponse(object):
+    def __init__(self, url):
+        self.url = url
+
 class FakePage(object):
     def __init__(self):
         self._callbacks = {}
 
     def on(self, name, callback):
         self._callbacks[name] = callback
-        callback(type('Response', (), {'url': 'https://example.com/graphql'})())
+        callback(FakeResponse('https://example.com/graphql'))
 
     def goto(self, url, wait_until='networkidle', timeout=0):
         return None

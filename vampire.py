@@ -21,6 +21,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 import warnings
 from urllib.parse import urlparse
@@ -225,7 +226,8 @@ keys = set()
 processed = set()
 bad_scripts = set()
 bad_intel = set()
-render_errors = []
+render_state = {'disabled': False, 'message': None}
+render_lock = threading.Lock()
 
 if resume_state:
     restored = normalize_checkpoint_sets(resume_state)
@@ -287,6 +289,8 @@ extractor_context = {
     'custom_regex': args.regex,
     'extract_secrets': api,
 }
+
+only_urls_context = dict(extractor_context, custom_regex=None, extract_secrets=False, bad_intel=set(), bad_scripts=set(), forms=set())
 
 
 def checkpoint_payload(stage):
@@ -366,6 +370,9 @@ def record_request_outcome(url, result, purpose):
 def maybe_render_page(url, result):
     if not args.render_js:
         return result.text
+    with render_lock:
+        if render_state['disabled']:
+            return result.text
     try:
         rendered = render_page(
             result.final_url or url,
@@ -375,7 +382,11 @@ def maybe_render_page(url, result):
             user_agent=random.choice(user_agents) if user_agents else None,
         )
     except Exception as exc:
-        render_errors.append(str(exc))
+        with render_lock:
+            if not render_state['disabled']:
+                render_state['disabled'] = True
+                render_state['message'] = str(exc)
+                print(f'{coffin}JS rendering disabled: {exc}')
         return result.text
     for discovered_url in rendered.urls:
         mark_scope(discovered_url)
@@ -391,7 +402,7 @@ def extractor(url):
         return
     response = maybe_render_page(url, result)
     if only_urls:
-        run_page_extractors(url, response, dict(extractor_context, custom_regex=None, extract_secrets=False, bad_intel=set(), bad_scripts=set(), forms=forms))
+        run_page_extractors(url, response, only_urls_context)
         return
     run_page_extractors(url, response, extractor_context)
 
@@ -448,10 +459,6 @@ for level in range(crawl_level):
         print(f'\n{moon}The vampire retreats into the darkness…')
         write_checkpoint(f'interrupted-depth-{level + 1}')
         break
-    if render_errors:
-        write_checkpoint(f'render-failed-depth-{level + 1}')
-        print(f'{coffin}{render_errors[0]}')
-        sys.exit(1)
     write_checkpoint(f'depth-{level + 1}')
 
 if not only_urls:
