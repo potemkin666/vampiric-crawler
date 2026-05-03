@@ -32,7 +32,7 @@ if exist "%SCRIPT_DIR%requirements.txt" (
 cd /d "%SCRIPT_DIR%"
 if "%~1"=="" (
     echo.
-    set /p TARGET_URL=Enter target URL (for example https://example.com): 
+    set /p TARGET_URL=Enter target URL (for example https://example.com):
     if not defined TARGET_URL (
         echo [X] No prey specified. Closing the coffin.
         pause

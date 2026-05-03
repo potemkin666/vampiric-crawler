@@ -141,6 +141,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 
 class RegressionTests(unittest.TestCase):
+    def _write_test_launcher(self, tmpdir):
+        launcher_path = os.path.join(tmpdir, 'launch.sh')
+        with open(os.path.join(REPO_ROOT, 'launch.sh'), 'r', encoding='utf-8') as src:
+            launcher = src.read()
+        with open(launcher_path, 'w', encoding='utf-8') as handle:
+            handle.write(launcher)
+        os.chmod(launcher_path, 0o755)
+        return launcher_path
+
+    def _write_python_stub(self, tmpdir, body):
+        bin_dir = os.path.join(tmpdir, 'bin')
+        os.makedirs(bin_dir)
+        python_stub = os.path.join(bin_dir, 'python3')
+        with open(python_stub, 'w', encoding='utf-8') as handle:
+            handle.write(body)
+        os.chmod(python_stub, 0o755)
+        return bin_dir
+
     def test_url_normalization_helpers(self):
         self.assertEqual(
             normalize_url('HTTPS://Example.com//a/../dup/?b=2&a=1#frag'),
@@ -205,28 +223,19 @@ class RegressionTests(unittest.TestCase):
 
     def test_launch_script_prompts_for_url_when_started_without_args(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            launcher_path = os.path.join(tmpdir, 'launch.sh')
-            with open(os.path.join(REPO_ROOT, 'launch.sh'), 'r', encoding='utf-8') as src:
-                launcher = src.read()
-            with open(launcher_path, 'w', encoding='utf-8') as handle:
-                handle.write(launcher)
-            os.chmod(launcher_path, 0o755)
+            launcher_path = self._write_test_launcher(tmpdir)
 
             with open(os.path.join(tmpdir, 'vampire.py'), 'w', encoding='utf-8') as handle:
                 handle.write('print("stub vampire")\n')
 
-            bin_dir = os.path.join(tmpdir, 'bin')
-            os.makedirs(bin_dir)
-            python_stub = os.path.join(bin_dir, 'python3')
-            with open(python_stub, 'w', encoding='utf-8') as handle:
-                handle.write(
-                    '#!/usr/bin/env bash\n'
-                    'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
-                    '  exit 0\n'
-                    'fi\n'
-                    'printf "%s\\n" "$@" > "$TEST_LOG"\n'
-                )
-            os.chmod(python_stub, 0o755)
+            bin_dir = self._write_python_stub(
+                tmpdir,
+                '#!/usr/bin/env bash\n'
+                'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+                '  exit 0\n'
+                'fi\n'
+                'printf "%s\\n" "$@" > "$TEST_LOG"\n',
+            )
 
             env = os.environ.copy()
             env['PATH'] = bin_dir + os.pathsep + env.get('PATH', '')
@@ -253,19 +262,8 @@ class RegressionTests(unittest.TestCase):
 
     def test_launch_script_rejects_empty_prompt_input(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            launcher_path = os.path.join(tmpdir, 'launch.sh')
-            with open(os.path.join(REPO_ROOT, 'launch.sh'), 'r', encoding='utf-8') as src:
-                launcher = src.read()
-            with open(launcher_path, 'w', encoding='utf-8') as handle:
-                handle.write(launcher)
-            os.chmod(launcher_path, 0o755)
-
-            bin_dir = os.path.join(tmpdir, 'bin')
-            os.makedirs(bin_dir)
-            python_stub = os.path.join(bin_dir, 'python3')
-            with open(python_stub, 'w', encoding='utf-8') as handle:
-                handle.write('#!/usr/bin/env bash\nexit 0\n')
-            os.chmod(python_stub, 0o755)
+            launcher_path = self._write_test_launcher(tmpdir)
+            bin_dir = self._write_python_stub(tmpdir, '#!/usr/bin/env bash\nexit 0\n')
 
             env = os.environ.copy()
             env['PATH'] = bin_dir + os.pathsep + env.get('PATH', '')
