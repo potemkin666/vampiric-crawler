@@ -107,7 +107,7 @@ SCAM_PATTERNS = (
     ('COUNTDOWN', re.compile(r'\b(?:countdown|timer ends|offer ends in)\b', re.I)),
     ('TRUST_CLONE', re.compile(r'\b(?:official store|verified seller|trusted by millions)\b', re.I)),
 )
-JS_TOKEN_RE = re.compile(r'(?i)\b(api[_-]?key|token|secret|auth[_-]?token)\b\s*[:=]\s*["\']([^"\']{6,200})["\']')
+JS_TOKEN_RE = re.compile(r'(?i)\b(api[_-]?key|token|secret|auth[_-]?token)\b["\']?\s*[:=]\s*["\']([^"\']{6,200})["\']')
 JS_FEATURE_RE = re.compile(r'(?i)\b([A-Za-z0-9_$]{3,64}(?:Flag|Feature|Toggle|Enabled))\b\s*[:=]\s*(true|false|["\'][^"\']{1,80}["\'])')
 JS_CONFIG_RE = re.compile(r'(?i)\b(config|settings|runtimeConfig|env)\b\s*[:=]\s*(\{.{1,240}?\})', re.S)
 JS_ROUTE_RE = re.compile(r'(?i)\b(?:route|router|path|pathname)\b[^"\']{0,40}["\']([^"\']{2,200})["\']')

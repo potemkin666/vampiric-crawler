@@ -719,7 +719,7 @@ class RegressionTests(unittest.TestCase):
                         sys.executable,
                         os.path.join(REPO_ROOT, 'vampire.py'),
                         '-u', server.base_url,
-                        '-l', '1',
+                        '-l', '2',
                         '-t', '2',
                         '--timeout', '2',
                         '--mode', mode,

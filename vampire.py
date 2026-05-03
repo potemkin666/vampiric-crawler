@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import warnings
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 warnings.filterwarnings('ignore')
 
