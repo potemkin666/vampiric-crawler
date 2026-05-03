@@ -85,7 +85,9 @@ def top_level(url, fix_protocol=False):
         return host
     except ValueError:
         pass
-    parts = host.split('.')
+    parts = [part for part in host.split('.') if part]
+    if not parts:
+        return ''
     return '.'.join(parts[-2:]) if len(parts) >= 2 else host
 
 
@@ -277,11 +279,12 @@ def extract_headers(raw):
         if not line:
             continue
         if ':' not in line:
-            raise ValueError(
-                f'Header line must use "Key: Value" format: {line}'
-            )
+            raise ValueError('Header lines must use "Key: Value" format.')
         key, _, value = line.partition(':')
-        headers[key.strip()] = value.strip()
+        key = key.strip()
+        if not key:
+            raise ValueError('Header name cannot be empty.')
+        headers[key] = value.strip()
     return headers
 
 

@@ -238,7 +238,7 @@ external  = set()            # Out-of-scope URLs
 fuzzable  = set()            # URLs with query parameters
 forms     = set()            # HTML forms with action/method/inputs
 endpoints = set()            # JS-extracted API endpoints
-processed = {'dummy'}        # Sentinel entry; real visited count subtracts this seed.
+processed = set()            # Already-visited URLs.
 internal  = set()            # In-scope URLs queue
 
 bad_scripts = set()
@@ -296,7 +296,7 @@ def record_request_outcome(url, result, purpose):
 
 def intel_extractor(url, response):
     """Sift through the victim's response for secrets."""
-    res = re.sub(r'<script.*?>.*?</script>', '', response, flags=re.I | re.S)
+    res = re.sub(r'<script\b[^>]*>.*?</script\s*>', '', response, flags=re.I | re.S)
     res = re.sub(r'<[^<]+?>', '', res)
     for name, pattern in rintels:
         for match in pattern.findall(res):
@@ -341,13 +341,22 @@ def form_extractor(page_url, response):
         )
 
 
+def first_secret_group(match):
+    """Return the first non-empty regex group from *match*."""
+    if isinstance(match, str):
+        return match.strip()
+    for item in match:
+        if item:
+            return item.strip()
+    return ''
+
+
 def secret_extractor(url, response):
     """Extract high-value tokens before falling back to generic entropy hits."""
     seen = set()
     for secret_name, pattern in rsecrets:
         for match in pattern.findall(response):
-            token = match if isinstance(match, str) else next((item for item in match if item), '')
-            token = token.strip()
+            token = first_secret_group(match)
             if token and (secret_name, token) not in seen:
                 verb('Key', f'{secret_name}: {token}')
                 keys.add(f'{url}:{secret_name}:{token}')
@@ -505,8 +514,7 @@ dataset_names = ['files', 'forms', 'intel', 'robots', 'custom', 'failed',
 
 writer(datasets, dataset_names, output_dir)
 
-# Ignore the sentinel value seeded into *processed* at startup.
-visited_count = len(processed) - 1
+visited_count = len(processed)
 stats_summary = stats.snapshot(visited=visited_count)
 writer([[
     f'{name}={value}' for name, value in sorted(stats_summary.items())
