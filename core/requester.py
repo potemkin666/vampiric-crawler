@@ -195,7 +195,12 @@ def requester(url, main_url, delay, cook, headers, timeout, host, proxies,
             )
 
         if core.config.verbose:
-            trail = f' ({len(redirect_chain)} redirect{"s" if len(redirect_chain) != 1 else ""})' if redirect_chain else ''
+            redirect_count = len(redirect_chain)
+            trail = (
+                f' ({redirect_count} redirect'
+                f'{"s" if redirect_count != 1 else ""})'
+                if redirect_chain else ''
+            )
             print(f'{crypt}Drained {status_code}{trail} ← {url}')
 
         return RequestResult(
