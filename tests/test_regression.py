@@ -8,6 +8,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from core import zap
 from core.utils import (
@@ -170,18 +171,22 @@ class RegressionTests(unittest.TestCase):
 
     def test_archive_seeding_collects_from_multiple_sources(self):
         def fake_fetch(url, timeout=8, headers=None, proxies=None):
+            parsed = urlsplit(url)
+            query = parse_qs(parsed.query)
+            archive_target = query.get('url', [''])[0]
+
             if url == 'https://index.commoncrawl.org/collinfo.json':
                 return json.dumps([
                     {'id': 'CC-MAIN-2025-18'},
                     {'id': 'CC-MAIN-2025-13'},
                 ])
-            if 'web.archive.org' in url and '*.example.com' in url:
+            if parsed.netloc == 'web.archive.org' and archive_target == '*.example.com/*':
                 return 'https://cdn.example.com/file\n'
-            if 'web.archive.org' in url and 'app.example.com' in url:
+            if parsed.netloc == 'web.archive.org' and archive_target == 'app.example.com/*':
                 return 'https://app.example.com/alpha\nhttps://app.example.com/beta?b=2&a=1\n'
-            if 'web.archive.org' in url and 'example.com' in url:
+            if parsed.netloc == 'web.archive.org' and archive_target == 'example.com/*':
                 return 'https://example.com/root\n'
-            if 'CC-MAIN-2025-18-index' in url and 'app.example.com' in url:
+            if parsed.netloc == 'index.commoncrawl.org' and parsed.path == '/CC-MAIN-2025-18-index' and archive_target == 'app.example.com/*':
                 return '\n'.join([
                     json.dumps({'url': 'https://app.example.com/beta?a=1&b=2'}),
                     json.dumps({'url': 'https://app.example.com/gamma'}),
