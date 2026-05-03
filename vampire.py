@@ -17,6 +17,7 @@
 from __future__ import print_function
 
 import argparse
+import io
 import json
 import os
 import random
@@ -93,6 +94,28 @@ from core.specimen import (
     resolve_ritual_plan,
     setup_status,
 )
+
+
+def _configure_console_stream(stream):
+    if stream is None:
+        return stream
+    try:
+        stream.reconfigure(errors='replace')
+        return stream
+    except (AttributeError, ValueError):
+        buffer = getattr(stream, 'buffer', None)
+        if buffer is None:
+            return stream
+        return io.TextIOWrapper(
+            buffer,
+            encoding=getattr(stream, 'encoding', None) or 'utf-8',
+            errors='replace',
+            line_buffering=True,
+        )
+
+
+sys.stdout = _configure_console_stream(sys.stdout)
+sys.stderr = _configure_console_stream(sys.stderr)
 
 BANNER = f"""
 {dark_red}🦇 Vampiric Crawler{end}  {crypt}v1.1.0{end}

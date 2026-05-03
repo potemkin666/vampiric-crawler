@@ -1003,6 +1003,22 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('--only-urls', rendered)
         self.assertIn('--temporal-baseline /tmp/baseline', rendered)
 
+    def test_cli_startup_handles_non_utf8_stdout(self):
+        process = subprocess.run(
+            [sys.executable, os.path.join(REPO_ROOT, 'vampire.py')],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, 'PYTHONIOENCODING': 'cp1252'},
+            check=False,
+        )
+        self.assertEqual(process.returncode, 1)
+        self.assertIn('Vampiric Crawler', process.stdout)
+        self.assertIn('No prey specified', process.stdout)
+        self.assertNotIn('UnicodeEncodeError', process.stdout)
+        self.assertNotIn('UnicodeEncodeError', process.stderr)
+
     def test_web_ui_state_and_export_routes_surface_sealed_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             app = create_app(Path(tmpdir))
