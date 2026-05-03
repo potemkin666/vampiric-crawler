@@ -137,7 +137,10 @@ def extract_document_records(document_url: str, payload: bytes, content_type: st
     leaks = set()
     lowered_path = urlsplit(document_url).path.lower()
     kind = content_type or 'application/octet-stream'
-    text = payload.decode('utf-8', 'ignore') or payload.decode('latin-1', 'ignore')
+    try:
+        text = payload.decode('utf-8')
+    except UnicodeDecodeError:
+        text = payload.decode('latin-1', 'ignore')
 
     if lowered_path.endswith('.pdf') or 'pdf' in kind:
         for key in ('Title', 'Author', 'Creator', 'Producer', 'Subject', 'CreationDate'):
@@ -260,7 +263,8 @@ def extract_story_records(page_url: str, response: str) -> set[str]:
     if not title:
         return records
     story_id = normalize_story_title(title) or 'story'
-    published = meta.get('article:published_time') or (TIME_RE.search(response).group(1) if TIME_RE.search(response) else '')
+    time_match = TIME_RE.search(response)
+    published = meta.get('article:published_time') or (time_match.group(1) if time_match else '')
     language = LANG_RE.search(response)
     site_name = meta.get('og:site_name') or (urlsplit(page_url).netloc or '')
     references = sorted(set(ABSOLUTE_LINK_RE.findall(response)))

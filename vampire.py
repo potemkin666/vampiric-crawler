@@ -583,6 +583,15 @@ def load_previous_snapshot(snapshot_dir):
     return snapshot
 
 
+def snapshot_exists(snapshot_dir):
+    if not snapshot_dir or not os.path.isdir(snapshot_dir):
+        return False
+    return any(
+        os.path.exists(os.path.join(snapshot_dir, f'{name}.txt'))
+        for name in list(dataset_names) + ['stats']
+    )
+
+
 print(f'{fang}Target locked: {bold}{main_url}{end}')
 if resume_state:
     print(f'{fang}Rising from checkpoint: {bold}{args.resume}{end}')
@@ -677,18 +686,22 @@ diff = now - then
 minutes, seconds, _ = timer(diff, processed)
 
 os.makedirs(output_dir, exist_ok=True)
-baseline_dir = temporal_baseline or (output_dir if mode == 'temporal' else None)
+baseline_dir = temporal_baseline
+if not baseline_dir and mode == 'temporal' and snapshot_exists(output_dir):
+    baseline_dir = output_dir
 datasets = [
     files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
     document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
 ]
-if mode == 'temporal':
+if mode == 'temporal' and baseline_dir:
     current_snapshot = {
         name: sorted(dataset)
         for name, dataset in zip(dataset_names, datasets)
     }
     current_snapshot['stats'] = stats.snapshot(visited=len(processed))
     temporal_diffs.update(build_temporal_diffs(load_previous_snapshot(baseline_dir), current_snapshot))
+elif mode == 'temporal':
+    temporal_diffs.add('dataset=temporal_diffs change=baseline-missing value=No prior snapshot found')
 writer(datasets, dataset_names, output_dir)
 
 visited_count = len(processed)
