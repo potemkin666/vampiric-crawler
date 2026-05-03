@@ -1,7 +1,11 @@
 """Utility helpers for Vampiric Crawler."""
+import ipaddress
 import math
+import posixpath
 import re
 import sys
+import threading
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import core.config
 from core.colors import crypt
@@ -71,11 +75,19 @@ def is_link(url, processed, files):
 
 def top_level(url, fix_protocol=False):
     """Return the registered (eTLD+1) domain of *url*."""
-    from urllib.parse import urlparse
     if fix_protocol and not url.startswith('http'):
         url = 'http://' + url
-    host = urlparse(url).netloc
-    parts = host.split('.')
+    host = urlsplit(url).hostname or ''
+    if not host:
+        return ''
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    parts = [part for part in host.split('.') if part]
+    if not parts:
+        return ''
     return '.'.join(parts[-2:]) if len(parts) >= 2 else host
 
 
@@ -96,14 +108,93 @@ def remove_file(url):
     return url
 
 
+def normalize_query_string(query):
+    """Return a stable query string with sorted key/value pairs."""
+    if not query:
+        return ''
+    pairs = parse_qsl(query, keep_blank_values=True)
+    pairs.sort(key=lambda item: item[0])
+    return urlencode(pairs, doseq=True)
+
+
+def normalize_url(url, base_url=None, keep_query=True):
+    """Return a canonical HTTP(S) URL with stable host/path/query formatting."""
+    if not url:
+        return ''
+    candidate = url.strip()
+    if not candidate:
+        return ''
+    if base_url:
+        candidate = urljoin(base_url, candidate)
+    elif candidate.startswith('//'):
+        candidate = 'http:' + candidate
+
+    parts = urlsplit(candidate)
+    if parts.scheme and parts.scheme not in ('http', 'https'):
+        return candidate
+
+    scheme = (parts.scheme or '').lower()
+    hostname = (parts.hostname or '').lower()
+    if scheme in ('http', 'https') and not hostname:
+        return ''
+
+    port = parts.port
+    netloc = hostname
+    if port and not ((scheme == 'http' and port == 80) or
+                     (scheme == 'https' and port == 443)):
+        netloc = f'{hostname}:{port}'
+
+    path = parts.path or '/'
+    if not path.startswith('/'):
+        path = '/' + path
+    path = re.sub(r'/+', '/', path)
+    path = posixpath.normpath(path)
+    if not path.startswith('/'):
+        path = '/' + path
+    if path != '/':
+        path = path.rstrip('/')
+
+    query = normalize_query_string(parts.query) if keep_query else ''
+    return urlunsplit((scheme, netloc, path, query, ''))
+
+
+def normalize_fuzzable_url(url):
+    """Return a canonical fuzzable URL with sorted unique parameter keys."""
+    normalized = normalize_url(url)
+    if not normalized:
+        return ''
+    parts = urlsplit(normalized)
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if not pairs:
+        return ''
+    keys = sorted({key for key, _ in pairs})
+    fuzz_query = urlencode([(key, '') for key in keys], doseq=True)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, fuzz_query, ''))
+
+
+def is_in_scope(url, host, domain, scope='host'):
+    """Return True if *url* belongs to the configured crawl scope."""
+    hostname = (urlsplit(url).hostname or '').lower()
+    target_host = (host or '').split(':', 1)[0].lower()
+    if not hostname or not target_host:
+        return False
+    if scope == 'host':
+        return hostname == target_host
+    if scope == 'domain':
+        if hostname == target_host or hostname.endswith('.' + target_host):
+            return True
+        return top_level(url, fix_protocol=True) == domain
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Verbose output
 # ---------------------------------------------------------------------------
 
-def verb(label, value):
+def verb(message):
     """Print a verbose message if verbose mode is on."""
     if core.config.verbose:
-        print(f'{crypt}{label}: {value}')
+        print(f'{crypt}{message}')
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +233,7 @@ def regxy(pattern, response, suppress, custom):
     try:
         matches = re.findall(pattern, response)
         for match in matches:
-            verb('Custom', match)
+            verb(f'Custom: {match}')
             custom.add(match)
     except re.error as exc:
         print(f'Invalid regex pattern: {exc}', file=sys.stderr)
@@ -185,7 +276,122 @@ def extract_headers(raw):
     headers = {}
     for line in raw.splitlines():
         line = line.strip()
-        if ':' in line:
-            key, _, value = line.partition(':')
-            headers[key.strip()] = value.strip()
+        if not line:
+            continue
+        if ':' not in line:
+            raise ValueError('Header lines must use "Key: Value" format.')
+        key, _, value = line.partition(':')
+        key = key.strip()
+        if not key:
+            raise ValueError('Header name cannot be empty.')
+        headers[key] = value.strip()
     return headers
+
+
+# ---------------------------------------------------------------------------
+# Content-type helpers
+# ---------------------------------------------------------------------------
+
+_MARKUP_CONTENT_TYPES = (
+    'text/html',
+    'application/xhtml+xml',
+    'application/xml',
+    'text/xml',
+)
+
+_SCRIPT_CONTENT_HINTS = (
+    'javascript',
+    'ecmascript',
+)
+
+_SKIPPED_CONTENT_PREFIXES = (
+    'image/',
+    'audio/',
+    'video/',
+    'font/',
+)
+
+_SKIPPED_CONTENT_TYPES = frozenset((
+    'application/octet-stream',
+    'application/pdf',
+    'application/zip',
+    'application/x-zip-compressed',
+    'application/x-7z-compressed',
+    'application/x-rar-compressed',
+))
+
+
+def normalize_content_type(raw):
+    """Return the normalized MIME type from a Content-Type header."""
+    if not raw:
+        return ''
+    return raw.split(';', 1)[0].strip().lower()
+
+
+def should_extract_markup(content_type):
+    """Return True if *content_type* should be parsed like a page."""
+    if not content_type:
+        return True
+    if content_type in _MARKUP_CONTENT_TYPES:
+        return True
+    return content_type.startswith('text/')
+
+
+def should_extract_script(content_type):
+    """Return True if *content_type* should be parsed like script/text."""
+    if not content_type:
+        return True
+    if any(hint in content_type for hint in _SCRIPT_CONTENT_HINTS):
+        return True
+    return content_type in ('application/json', 'text/plain')
+
+
+def skip_reason_for_content_type(content_type):
+    """Return a machine-readable skip reason for *content_type* or None."""
+    if not content_type:
+        return None
+    if content_type.startswith(_SKIPPED_CONTENT_PREFIXES):
+        return 'binary-content'
+    if content_type in _SKIPPED_CONTENT_TYPES:
+        return 'binary-content'
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Crawl stats
+# ---------------------------------------------------------------------------
+
+_STAT_KEYS = (
+    'requests',
+    'successes',
+    'redirects',
+    'failures',
+    'client_errors',
+    'server_errors',
+    'skipped',
+    'binary_skips',
+    'empty_responses',
+    'markup_pages',
+    'script_pages',
+)
+
+
+class CrawlStats(object):
+    """Thread-safe crawl counters."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = {key: 0 for key in _STAT_KEYS}
+
+    def bump(self, key, amount=1):
+        """Increase *key* by *amount*."""
+        with self._lock:
+            self._counts[key] = self._counts.get(key, 0) + amount
+
+    def snapshot(self, visited=None):
+        """Return a stable summary of the current counters."""
+        with self._lock:
+            counts = dict(self._counts)
+        if visited is not None:
+            counts['visited'] = visited
+        return counts

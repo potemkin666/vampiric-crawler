@@ -18,6 +18,10 @@ def exporter(output_dir, fmt, datasets):
             writer = csv.writer(f)
             writer.writerow(['category', 'value'])
             for category, items in datasets.items():
-                for item in items:
-                    writer.writerow([category, item])
+                if isinstance(items, dict):
+                    for key, value in sorted(items.items()):
+                        writer.writerow([category, f'{key}={value}'])
+                else:
+                    for item in items:
+                        writer.writerow([category, item])
         print(f'  Exported CSV  → {fpath}')
