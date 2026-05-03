@@ -25,9 +25,9 @@
   ╚═══╝  ╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝
         </pre>
         <div class="hero-copy">
-          <p class="eyebrow">FORBIDDEN MONASTERY MAINFRAME // LIVING CRAWLER DAEMON</p>
-          <h1>Cursed Gothic DOS Web Crawler Console</h1>
-          <p class="subcopy">Target sites, descend through depth, inspect relics, read omens, and seal records without sacrificing clarity.</p>
+          <p class="eyebrow">NOCTURNAL ABBEY MAINFRAME // BLOOD-SOAKED RECON DAEMON</p>
+          <h1>Catacomb Console of the Vampiric Crawler</h1>
+          <p class="subcopy">Name a prey, choose a rite, descend through cursed halls, exhume relics, read omens, and seal the harvest before dawn notices.</p>
         </div>
         <div class="status-banner">
           <div>
@@ -52,6 +52,20 @@
 
           <div class="field-grid">
             <label>
+              <span>RITE OF THE NIGHT</span>
+              <select id="crawlMode" name="crawlMode">
+                <option value="generic">GENERIC HUNT</option>
+                <option value="document">DOCUMENT HARVESTER</option>
+                <option value="js-intel">JS INTELLIGENCE</option>
+                <option value="forum">THREAD NECROMANCY</option>
+                <option value="geo">GEO-INTELLIGENCE</option>
+                <option value="news">NEWS PROPAGATION</option>
+                <option value="hidden">SHADOW GATE HUNT</option>
+                <option value="scam">SCAM / DARK PATTERN</option>
+                <option value="temporal">TEMPORAL CHANGE</option>
+              </select>
+            </label>
+            <label>
               <span>DEPTH OF DESCENT</span>
               <input id="depth" name="depth" type="number" min="1" max="8" value="2">
             </label>
@@ -68,23 +82,24 @@
               <input id="timeout" name="timeout" type="number" min="1" step="1" value="8">
             </label>
           </div>
+          <div class="mode-hint" id="modeHint">GENERIC HUNT // Balanced reconnaissance across pages, forms, scripts, and relics.</div>
         </form>
 
         <section class="terminal-panel settings-panel">
           <div class="panel-title">CRAWL FLAGS // RITUAL CONFIGURATION</div>
           <div class="flag-grid">
-            <label class="flag-option"><input id="scopeDomain" type="checkbox"><span>[ ] WHOLE DOMAIN DESCENT</span></label>
-            <label class="flag-option"><input id="extractIntel" type="checkbox" checked><span>[X] EXTRACT MAIL SIGILS</span></label>
-            <label class="flag-option"><input id="extractSecrets" type="checkbox"><span>[ ] HUNT SECRET RELICS</span></label>
-            <label class="flag-option"><input id="respectRobots" type="checkbox" checked><span>[X] HONOR ROBOTS CRAWL-DELAY</span></label>
-            <label class="flag-option"><input id="renderJs" type="checkbox"><span>[ ] RENDER SHADOW DOM</span></label>
-            <label class="flag-option"><input id="archiveSeeds" type="checkbox"><span>[ ] WAKE ARCHIVE SEEDS</span></label>
-            <label class="flag-option"><input id="dns" type="checkbox"><span>[ ] TRACE BLOODLINES (DNS)</span></label>
+            <label class="flag-option" data-flag="scope"><input id="scopeDomain" type="checkbox"><span>[ ] WHOLE DOMAIN DESCENT</span></label>
+            <label class="flag-option" data-flag="intel"><input id="extractIntel" type="checkbox" checked><span>[X] EXTRACT MAIL SIGILS</span></label>
+            <label class="flag-option" data-flag="secrets"><input id="extractSecrets" type="checkbox"><span>[ ] HUNT SECRET RELICS</span></label>
+            <label class="flag-option" data-flag="robots"><input id="respectRobots" type="checkbox" checked><span>[X] HONOR ROBOTS CRAWL-DELAY</span></label>
+            <label class="flag-option" data-flag="render"><input id="renderJs" type="checkbox"><span>[ ] RENDER SHADOW DOM</span></label>
+            <label class="flag-option" data-flag="archive"><input id="archiveSeeds" type="checkbox"><span>[ ] WAKE ARCHIVE SEEDS</span></label>
+            <label class="flag-option" data-flag="dns"><input id="dns" type="checkbox"><span>[ ] TRACE BLOODLINES (DNS)</span></label>
           </div>
           <div class="command-buttons">
-            <button type="button" id="beginButton" class="terminal-button terminal-button--primary">&gt; BEGIN CRAWL</button>
-            <button type="button" id="pauseButton" class="terminal-button">&gt; PAUSE DESCENT</button>
-            <button type="button" id="stopButton" class="terminal-button terminal-button--danger">&gt; HALT RITE</button>
+            <button type="button" id="beginButton" class="terminal-button terminal-button--primary">&gt; OPEN THE CRYPT</button>
+            <button type="button" id="pauseButton" class="terminal-button">&gt; SUSPEND THE RITE</button>
+            <button type="button" id="stopButton" class="terminal-button terminal-button--danger">&gt; DRIVE IN THE STAKE</button>
           </div>
         </section>
       </section>

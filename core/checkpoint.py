@@ -4,6 +4,8 @@ import os
 import tempfile
 import time
 
+from core.modes import MODE_DATASET_NAMES
+
 
 CHECKPOINT_VERSION = 1
 
@@ -11,7 +13,7 @@ CHECKPOINT_VERSION = 1
 DATASET_NAMES = (
     'files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped',
     'redirects', 'internal', 'scripts', 'external', 'fuzzable',
-    'endpoints', 'keys', 'processed', 'bad_scripts', 'bad_intel',
+    'endpoints', 'keys', *MODE_DATASET_NAMES, 'processed', 'bad_scripts', 'bad_intel',
 )
 
 

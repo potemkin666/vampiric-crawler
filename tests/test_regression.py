@@ -14,6 +14,16 @@ from urllib.parse import parse_qs, urlsplit
 
 from core import render, zap
 from core.checkpoint import load_checkpoint, normalize_checkpoint_sets, save_checkpoint
+from core.modes import (
+    build_hidden_candidates,
+    build_temporal_diffs,
+    extract_document_records,
+    extract_js_intel,
+    extract_location_records,
+    extract_scam_signals,
+    extract_story_records,
+    extract_thread_records,
+)
 from core.politeness import PolitenessController
 from core.utils import (
     extract_headers,
@@ -38,7 +48,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     flaky_hits = 0
 
     def _send(self, status, body, content_type='text/html', headers=None):
-        encoded = body.encode('utf-8')
+        encoded = body if isinstance(body, bytes) else body.encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(encoded)))
@@ -62,6 +72,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 '<a href="/dup?a=1&b=2#frag">dup-b</a>'
                 '<a href="./dup/?a=9&b=8">dup-c</a>'
                 '<a href="/appdata">appdata</a>'
+                '<a href="/thread">thread</a>'
+                '<a href="/geo">geo</a>'
+                '<a href="/news">news</a>'
+                '<a href="/offer">offer</a>'
+                '<a href="/report.pdf">report</a>'
                 '<a href="https://discord.gg/nightshift">discord</a>'
                 '<script src="/script.js"></script>'
                 '<form action="/submit" method="post">'
@@ -98,7 +113,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif self.path == '/script.js':
             self._send(
                 200,
-                'const api="/api/crypt"; fetch("/graphql"); //# sourceMappingURL=/script.js.map',
+                'const api="/api/crypt";'
+                'fetch("/graphql");'
+                'const betaCheckoutFlag=true;'
+                'const runtimeConfig={"base":"/api/crypt","token":"sk_live_1234567890abcdef"};'
+                'const routeName="/hidden/panel";'
+                '//# sourceMappingURL=/script.js.map',
                 content_type='application/javascript',
             )
         elif self.path == '/script.js.map':
@@ -117,6 +137,48 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self._send(200, '<html><body>submitted</body></html>')
         elif self.path == '/hidden':
             self._send(200, '<html><body>hidden chamber</body></html>')
+        elif self.path == '/admin':
+            self._send(200, '<html><body>admin reliquary</body></html>')
+        elif self.path == '/thread':
+            self._send(
+                200,
+                '<html><head><title>Night Thread</title></head><body>'
+                '<article class="post" id="post-1"><span class="author">CountZero</span>'
+                '<p>First omen rises.</p></article>'
+                '<article class="reply" id="post-2" data-parent="post-1"><span class="username">deleted-user</span>'
+                '<blockquote>First omen rises.</blockquote><p>Reply from the dark.</p></article>'
+                '</body></html>',
+            )
+        elif self.path == '/geo':
+            self._send(
+                200,
+                '<html lang="en"><head><meta name="geo.position" content="40.7128;-74.0060"></head>'
+                '<body>Gathering in New York near Midnight Harbor 40.7128, -74.0060</body></html>',
+            )
+        elif self.path == '/news':
+            self._send(
+                200,
+                '<html lang="en"><head>'
+                '<title>Vampire bats swarm the wires</title>'
+                '<meta property="og:site_name" content="Night Wire">'
+                '<meta property="article:published_time" content="2026-05-03T00:15:00Z">'
+                '</head><body>'
+                '"Witnesses saw sparks in the abbey."'
+                '<a href="https://mirror.example.net/story">mirror</a>'
+                '</body></html>',
+            )
+        elif self.path == '/offer':
+            self._send(
+                200,
+                '<html><body>Limited time! Only 2 left. Offer ends in 03:00. Crypto only.</body></html>',
+            )
+        elif self.path == '/report.pdf':
+            self._send(
+                200,
+                b'%PDF-1.4\n1 0 obj<< /Author (Dracula) /Title (Night Ledger) >>endobj\n'
+                b'Contact: archivist@example.com\nPath C:\\Users\\Vlad\\Documents\\ledger.xlsx\n',
+                content_type='application/pdf',
+            )
         elif self.path == '/sitemap-only':
             self._send(200, '<html><body>sitemap only</body></html>')
         elif self.path == '/sitemap-deep':
@@ -338,6 +400,70 @@ class RegressionTests(unittest.TestCase):
         controller.record_response('https://example.com', 429, {'Retry-After': '2'})
         state = controller._host_state('example.com')
         self.assertGreaterEqual(state['next_allowed'], time.time() + 1.5)
+
+    def test_mode_helpers_extract_specialized_records(self):
+        metadata, leaks = extract_document_records(
+            'https://example.com/report.pdf',
+            b'%PDF-1.4 /Author (Dracula) /Title (Night Ledger) analyst@example.com C:\\Users\\Vlad\\report.docx',
+            'application/pdf',
+        )
+        self.assertTrue(any('author=Dracula' in item for item in metadata))
+        self.assertTrue(any('analyst@example.com' in item for item in leaks))
+        self.assertTrue(any('C:\\Users\\Vlad\\report.docx' in item for item in leaks))
+
+        js_records = extract_js_intel(
+            'https://example.com/app.js',
+            'const betaCheckoutFlag=true; const runtimeConfig={"base":"/api"}; const token="sk_live_1234";',
+        )
+        self.assertTrue(any('feature=betaCheckoutFlag' in item for item in js_records))
+        self.assertTrue(any('config=runtimeConfig' in item for item in js_records))
+
+        thread_records = extract_thread_records(
+            'https://example.com/thread',
+            '<html><title>Night Thread</title><article class="post"><span class="author">CountZero</span>'
+            '<blockquote>First omen rises.</blockquote>Reply from the dark.</article></html>',
+        )
+        self.assertTrue(any('thread=Night Thread' in item for item in thread_records))
+
+        location_records = extract_location_records(
+            'https://example.com/geo',
+            '<html><head><meta name="geo.position" content="40.7128;-74.0060"></head>'
+            '<body>Gathering in New York 40.7128, -74.0060</body></html>',
+        )
+        self.assertTrue(any('lat=40.7128' in item for item in location_records))
+        self.assertTrue(any('label=New York' in item for item in location_records))
+
+        story_records = extract_story_records(
+            'https://example.com/news',
+            '<html lang="en"><head><title>Vampire bats swarm the wires</title>'
+            '<meta property="og:site_name" content="Night Wire">'
+            '<meta property="article:published_time" content="2026-05-03T00:15:00Z"></head>'
+            '<body>"Witnesses saw sparks in the abbey."<a href="https://mirror.example.net/story">mirror</a></body></html>',
+        )
+        self.assertTrue(any('story=vampire-bats-swarm-the-wires' in item for item in story_records))
+        self.assertTrue(any('reference=https://mirror.example.net/story' in item for item in story_records))
+
+        scam_records = extract_scam_signals(
+            'https://example.com/offer',
+            '<html><body>Limited time! Only 2 left. Offer ends in 03:00. Crypto only.</body></html>',
+        )
+        self.assertTrue(any('signal=FAKE_URGENCY' in item for item in scam_records))
+        self.assertTrue(any('signal=PRESSURE_PAYMENT' in item for item in scam_records))
+
+        hidden_candidates = build_hidden_candidates(
+            'https://example.com',
+            {'https://example.com/app'},
+            {'https://example.com/static/app.js'},
+            {'/api/crypt'},
+        )
+        self.assertIn('https://example.com/admin', hidden_candidates)
+
+        diffs = build_temporal_diffs(
+            {'internal': ['https://example.com/old'], 'stats': {'visited': 1}},
+            {'internal': ['https://example.com/new'], 'stats': {'visited': 2}},
+        )
+        self.assertTrue(any('change=added value=https://example.com/new' in item for item in diffs))
+        self.assertTrue(any('metric=visited before=1 after=2' in item for item in diffs))
 
     def test_launch_script_prompts_for_url_when_started_without_args(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -576,6 +702,87 @@ class RegressionTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test_cli_mode_runs_emit_specialized_datasets(self):
+        FixtureHandler.header_failures = []
+        FixtureHandler.flaky_hits = 0
+
+        server = ThreadedHTTPServer(('127.0.0.1', 0), FixtureHandler)
+        server.base_url = 'http://127.0.0.1:{}'.format(server.server_port)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                def run_mode(mode, output_dir, extra_args=None):
+                    command = [
+                        sys.executable,
+                        os.path.join(REPO_ROOT, 'vampire.py'),
+                        '-u', server.base_url,
+                        '-l', '1',
+                        '-t', '2',
+                        '--timeout', '2',
+                        '--mode', mode,
+                        '-o', output_dir,
+                        '-H', 'X-Blood: moon',
+                    ]
+                    if extra_args:
+                        command.extend(extra_args)
+                    result = subprocess.run(
+                        command,
+                        cwd=REPO_ROOT,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, msg=result.stderr)
+                    return result
+
+                js_output = os.path.join(tmpdir, 'js')
+                run_mode('js-intel', js_output)
+                self.assertIn('feature=betaCheckoutFlag', Path(js_output, 'js_intel.txt').read_text(encoding='utf-8'))
+                self.assertIn('token=token', Path(js_output, 'js_intel.txt').read_text(encoding='utf-8'))
+
+                doc_output = os.path.join(tmpdir, 'docs')
+                run_mode('document', doc_output)
+                self.assertIn('author=Dracula', Path(doc_output, 'document_metadata.txt').read_text(encoding='utf-8'))
+                self.assertIn('archivist@example.com', Path(doc_output, 'document_leaks.txt').read_text(encoding='utf-8'))
+
+                hidden_output = os.path.join(tmpdir, 'hidden')
+                run_mode('hidden', hidden_output)
+                self.assertIn('/admin', Path(hidden_output, 'hidden_paths.txt').read_text(encoding='utf-8'))
+
+                forum_output = os.path.join(tmpdir, 'forum')
+                run_mode('forum', forum_output)
+                self.assertIn('Night Thread', Path(forum_output, 'threads.txt').read_text(encoding='utf-8'))
+
+                geo_output = os.path.join(tmpdir, 'geo')
+                run_mode('geo', geo_output)
+                self.assertIn('lat=40.7128', Path(geo_output, 'locations.txt').read_text(encoding='utf-8'))
+
+                news_output = os.path.join(tmpdir, 'news')
+                run_mode('news', news_output)
+                self.assertIn('story=vampire-bats-swarm-the-wires', Path(news_output, 'stories.txt').read_text(encoding='utf-8'))
+
+                scam_output = os.path.join(tmpdir, 'scam')
+                run_mode('scam', scam_output)
+                self.assertIn('signal=FAKE_URGENCY', Path(scam_output, 'scam_signals.txt').read_text(encoding='utf-8'))
+
+                baseline_dir = os.path.join(tmpdir, 'baseline')
+                os.makedirs(baseline_dir)
+                Path(baseline_dir, 'internal.txt').write_text(server.base_url + '/old\n', encoding='utf-8')
+                Path(baseline_dir, 'stats.txt').write_text('visited=1\n', encoding='utf-8')
+                temporal_output = os.path.join(tmpdir, 'temporal')
+                run_mode('temporal', temporal_output, ['--temporal-baseline', baseline_dir])
+                temporal_text = Path(temporal_output, 'temporal_diffs.txt').read_text(encoding='utf-8')
+                self.assertIn('change=removed value=' + server.base_url + '/old', temporal_text)
+                self.assertIn('metric=visited before=1', temporal_text)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_cli_can_resume_from_checkpoint(self):
         FixtureHandler.header_failures = []
         FixtureHandler.flaky_hits = 0
@@ -645,6 +852,7 @@ class RegressionTests(unittest.TestCase):
             command = build_crawl_command(
                 {
                     'target_url': 'https://example.com',
+                    'mode': 'temporal',
                     'depth': 3,
                     'threads': 6,
                     'delay': 0.5,
@@ -656,6 +864,7 @@ class RegressionTests(unittest.TestCase):
                     'render_js': True,
                     'archive_seeds': True,
                     'enumerate_subdomains': True,
+                    'temporal_baseline': '/tmp/baseline',
                 },
                 output_dir=os.path.abspath(output_dir),
                 checkpoint_path=os.path.abspath(checkpoint),
@@ -665,12 +874,14 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('-l 3', rendered)
         self.assertIn('-t 6', rendered)
         self.assertIn('--scope domain', rendered)
+        self.assertIn('--mode temporal', rendered)
         self.assertIn('--respect-robots-delay', rendered)
         self.assertIn('--render-js', rendered)
         self.assertIn('--wayback', rendered)
         self.assertIn('--dns', rendered)
         self.assertIn('--keys', rendered)
         self.assertIn('--only-urls', rendered)
+        self.assertIn('--temporal-baseline /tmp/baseline', rendered)
 
     def test_web_ui_state_and_export_routes_surface_sealed_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -686,7 +897,7 @@ class RegressionTests(unittest.TestCase):
             (output_dir / 'stats.txt').write_text('visited=2\nfailures=1\nredirects=0\n', encoding='utf-8')
             manager.current_run = CrawlRun(
                 run_id='sealed-record',
-                payload={'target_url': 'https://example.com', 'depth': 2, 'threads': 4},
+                payload={'target_url': 'https://example.com', 'depth': 2, 'threads': 4, 'mode': 'document'},
                 output_dir=output_dir,
                 checkpoint_path=checkpoint,
                 command=[sys.executable, os.path.join(REPO_ROOT, 'vampire.py')],
@@ -700,8 +911,11 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(state_response.status_code, 200)
                 state_data = state_response.get_json()
                 self.assertEqual(state_data['status'], 'complete')
+                self.assertEqual(state_data['mode'], 'document')
+                self.assertEqual(state_data['summary']['mode_label'], 'Document harvester')
                 self.assertEqual(state_data['summary']['document_tombs'], 1)
                 self.assertEqual(state_data['summary']['mail_sigils'], 1)
+                self.assertTrue(any(panel['key'] == 'documents' for panel in state_data['panels']))
                 self.assertTrue(any(item['kind'] == 'report' for item in state_data['exports']))
 
                 report_response = client.get('/api/exports/report')

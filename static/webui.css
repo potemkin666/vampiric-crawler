@@ -249,13 +249,21 @@ body::after {
 }
 
 .command-input-wrap input,
-.field-grid input {
+.field-grid input,
+.field-grid select {
   width: 100%;
   border: 0;
   outline: 0;
   background: transparent;
   color: var(--text-bone);
   font: inherit;
+}
+
+.field-grid select {
+  appearance: none;
+  border: 1px solid rgba(133, 255, 152, 0.25);
+  background: rgba(5, 10, 7, 0.9);
+  padding: 0.55rem 0.65rem;
 }
 
 .prompt-glyph,
@@ -292,6 +300,14 @@ body::after {
   padding-left: 0.75rem;
 }
 
+.mode-hint {
+  margin-top: 0.9rem;
+  padding: 0.75rem;
+  border: 1px dashed rgba(227, 161, 63, 0.5);
+  color: var(--text-bone);
+  background: rgba(30, 12, 15, 0.22);
+}
+
 .field-grid,
 .flag-grid,
 .summary-chips,
@@ -310,6 +326,10 @@ body::after {
 .flag-option {
   display: grid;
   gap: 0.3rem;
+}
+
+.flag-option.is-hidden {
+  display: none;
 }
 
 .field-grid label span,
