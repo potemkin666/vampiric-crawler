@@ -6,6 +6,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP="$SCRIPT_DIR/vampire.py"
 
 # ── Check for Python 3 ───────────────────────────────────────
 if command -v python3 &>/dev/null; then
@@ -23,11 +24,18 @@ if [ -f "$REQ" ]; then
     $PYTHON -m pip install -q -r "$REQ" 2>/dev/null || true
 fi
 
+# ── Ensure the entrypoint exists ──────────────────────────────
+if [ ! -f "$APP" ]; then
+    echo "[☠] Missing entrypoint: $APP" >&2
+    exit 1
+fi
+
 # ── Prompt for a target when launched without CLI args ───────
 if [ "$#" -eq 0 ]; then
     if [ -t 0 ] || [ -n "${VAMPIRIC_LAUNCH_PROMPT:-}" ]; then
         printf "Enter target URL (for example https://example.com): "
         IFS= read -r TARGET_URL
+        TARGET_URL="$(printf '%s' "$TARGET_URL" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
         if [ -z "$TARGET_URL" ]; then
             echo "[☠] No prey specified. Closing the coffin." >&2
             exit 1
@@ -41,4 +49,4 @@ fi
 
 # ── Run ─────────────────────────────────────────────────────
 cd "$SCRIPT_DIR"
-$PYTHON vampire.py "$@"
+$PYTHON "$APP" "$@"
