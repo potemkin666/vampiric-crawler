@@ -1,8 +1,0 @@
-http://127.0.0.1:35555/
-http://127.0.0.1:35555/flaky
-http://127.0.0.1:35555/hidden
-http://127.0.0.1:35555/missing
-http://127.0.0.1:35555/page
-http://127.0.0.1:35555/redirect
-http://127.0.0.1:35555/sitemap-deep
-http://127.0.0.1:35555/sitemap-only

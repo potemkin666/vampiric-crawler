@@ -581,6 +581,7 @@ class RegressionTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 checkpoint = os.path.join(tmpdir, 'crawl.json')
+                seed_output = os.path.join(tmpdir, 'seed-loot')
                 output_dir = os.path.join(tmpdir, 'loot')
                 seed_only = subprocess.run(
                     [
@@ -589,6 +590,7 @@ class RegressionTests(unittest.TestCase):
                         '-u', server.base_url,
                         '-l', '0',
                         '--checkpoint', checkpoint,
+                        '-o', seed_output,
                         '-H', 'X-Blood: moon',
                     ],
                     cwd=REPO_ROOT,

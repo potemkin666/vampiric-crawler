@@ -1,8 +1,0 @@
-http://127.0.0.1:36181/
-http://127.0.0.1:36181/flaky
-http://127.0.0.1:36181/hidden
-http://127.0.0.1:36181/missing
-http://127.0.0.1:36181/page
-http://127.0.0.1:36181/redirect
-http://127.0.0.1:36181/sitemap-deep
-http://127.0.0.1:36181/sitemap-only
