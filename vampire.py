@@ -501,7 +501,7 @@ policy = PolitenessController(
 def emit_webui_event(event_type, payload):
     if not webui_events_enabled:
         return
-    print(f'@@WEBUI@@{json.dumps({"type": event_type, "payload": payload}, sort_keys=True, ensure_ascii=False)}', flush=True)
+    print(f'[WEBUI]{json.dumps({"type": event_type, "payload": payload}, sort_keys=True, ensure_ascii=False)}', flush=True)
 
 
 def _queue_snapshot_locked(limit=12):
