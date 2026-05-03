@@ -10,7 +10,7 @@ from core.utils import normalize_url
 
 warnings.filterwarnings('ignore')
 
-_ROBOTS_AGENT = 'vampiriccrawler'
+_ROBOTS_AGENT = 'vampiriccrawler/1.0'
 _MAX_SITEMAPS = 25
 _MAX_ARCHIVE_INDEXES = 3
 _ARCHIVE_LIMIT = 200

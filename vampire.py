@@ -239,7 +239,7 @@ external  = set()            # Out-of-scope URLs
 fuzzable  = set()            # URLs with query parameters
 forms     = set()            # HTML forms with action/method/inputs
 endpoints = set()            # JS-extracted API endpoints
-processed = set()            # Already-visited URLs.
+processed = set()            # Already-visited URLs
 internal  = set()            # In-scope URLs queue
 
 bad_scripts = set()

@@ -265,9 +265,10 @@ class RegressionTests(unittest.TestCase):
 
                 with open(os.path.join(output_dir, 'forms.txt'), 'r', encoding='utf-8') as handle:
                     forms = handle.read()
-                self.assertIn('action=', forms)
+                self.assertIn(f'action={server.base_url}/submit', forms)
                 self.assertIn('method=POST', forms)
                 self.assertIn('email:email', forms)
+                self.assertIn('token:hidden', forms)
 
                 with open(os.path.join(output_dir, 'fuzzable.txt'), 'r', encoding='utf-8') as handle:
                     fuzzable = handle.read().strip().splitlines()
