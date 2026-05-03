@@ -60,16 +60,15 @@ if sys.version_info < (3, 6):
 
 from urllib.parse import urlparse
 
-import requests
-
 import core.config
 from core.config import INTELS
 from core.flash import flash
-from core.requester import requester
+from core.requester import requester, get_session
 from core.utils import (
     luhn, proxy_type, is_good_proxy, top_level,
     extract_headers, verb, is_link, entropy,
     regxy, remove_regex, remove_file, timer, writer,
+    should_extract_markup, should_extract_script, CrawlStats,
 )
 from core.regex import rintels, rendpoint, rhref, rscript, rentropy
 from core.zap import zap
@@ -126,6 +125,9 @@ parser.add_argument('-c', '--cookie',
 parser.add_argument('--user-agent',
                     help='Custom user agent string(s), comma-separated',
                     dest='user_agent')
+parser.add_argument('-H', '--header', '--headers',
+                    help='Custom header in Key: Value form (repeatable)',
+                    dest='headers', action='append', default=[])
 parser.add_argument('-p', '--proxy',
                     help='Proxy or proxies in HOST:PORT format (comma-separated)',
                     dest='proxies', type=proxy_type)
@@ -169,6 +171,12 @@ only_urls    = bool(args.only_urls)
 crawl_level  = args.level
 thread_count = args.threads
 
+try:
+    headers = extract_headers('\n'.join(args.headers))
+except ValueError as exc:
+    print(f'{coffin}Malformed header tribute: {exc}')
+    sys.exit(1)
+
 # ── Proxy setup ────────────────────────────────────────────────────────────────
 proxies = []
 if args.proxies:
@@ -189,8 +197,8 @@ if main_inp.startswith('http'):
     main_url = main_inp
 else:
     try:
-        requests.get('https://' + main_inp, proxies=random.choice(proxies),
-                     timeout=timeout, verify=False)
+        get_session().get('https://' + main_inp, proxies=random.choice(proxies),
+                          timeout=timeout, verify=False, headers=headers or None)
         main_url = 'https://' + main_inp
     except Exception:
         main_url = 'http://' + main_inp
@@ -218,12 +226,15 @@ else:
         user_agents = ['Mozilla/5.0 (compatible; VampiricCrawler/1.0)']
 
 # ── Data stores ───────────────────────────────────────────────────────────────
+stats     = CrawlStats()
 keys      = set()            # High-entropy secret keys
 files     = set()            # Static assets (pdf, png, …)
 intel     = set()            # Emails, social accounts, buckets, …
 robots    = set()            # robots.txt entries
 custom    = set()            # Custom regex matches
 failed    = set()            # URLs that could not be fetched
+skipped   = set()            # URLs skipped before parsing
+redirects = set()            # Redirect trails
 scripts   = set()            # JavaScript files
 external  = set()            # Out-of-scope URLs
 fuzzable  = set()            # URLs with query parameters
@@ -237,6 +248,51 @@ bad_intel   = set()
 suppress_regex = False
 
 # ── Core extraction functions ──────────────────────────────────────────────────
+
+def mark_scope(url):
+    """Record *url* as internal or external based on scope."""
+    if not url:
+        return
+    if url.startswith(main_url):
+        internal.add(url)
+    elif url.startswith('//'):
+        if url.split('/')[2].startswith(host):
+            internal.add(f'{schema}{url}')
+        else:
+            external.add(url)
+    elif url.startswith('http'):
+        external.add(url)
+
+
+def record_request_outcome(url, result, purpose):
+    """Track redirect and skip metadata before extraction begins."""
+    if result.redirected:
+        trail = ' -> '.join(result.redirect_chain + (result.final_url,))
+        redirects.add(f'{url} => {trail}')
+        if result.final_url != url:
+            mark_scope(result.final_url)
+
+    if result.skip_reason:
+        skipped.add(f'{purpose}:{url}:{result.skip_reason}')
+        return False
+
+    if result.ok:
+        if purpose == 'page':
+            if should_extract_markup(result.content_type):
+                stats.bump('markup_pages')
+            else:
+                stats.bump('skipped')
+                skipped.add(f'{purpose}:{url}:content-type:{result.content_type or "unknown"}')
+                return False
+        elif purpose == 'script':
+            if should_extract_script(result.content_type):
+                stats.bump('script_pages')
+            else:
+                stats.bump('skipped')
+                skipped.add(f'{purpose}:{url}:content-type:{result.content_type or "unknown"}')
+                return False
+
+    return result.ok
 
 def intel_extractor(url, response):
     """Sift through the victim's response for secrets."""
@@ -259,10 +315,13 @@ def js_extractor(response):
 
 def extractor(url):
     """Feed on *url*: request it and harvest every link and secret."""
-    response = requester(
-        url, main_url, delay, cook, {}, timeout,
-        host, proxies, user_agents, failed, processed,
+    result = requester(
+        url, main_url, delay, cook, headers, timeout,
+        host, proxies, user_agents, failed, processed, stats,
     )
+    if not record_request_outcome(url, result, 'page'):
+        return
+    response = result.text
 
     # Harvest links
     for link_match in rhref.findall(response):
@@ -279,7 +338,7 @@ def extractor(url):
         elif link.startswith('//'):
             if link.split('/')[2].startswith(host):
                 verb('Internal page', link)
-                internal.add(f'{schema}:{link}')
+                internal.add(f'{schema}{link}')
             else:
                 verb('External page', link)
                 external.add(link)
@@ -308,10 +367,13 @@ def extractor(url):
 
 def jscanner(url):
     """Drain JavaScript files for endpoint paths."""
-    response = requester(
-        url, main_url, delay, cook, {}, timeout,
-        host, proxies, user_agents, failed, processed,
+    result = requester(
+        url, main_url, delay, cook, headers, timeout,
+        host, proxies, user_agents, failed, processed, stats,
     )
+    if not record_request_outcome(url, result, 'script'):
+        return
+    response = result.text
     for match in rendpoint.findall(response):
         path = match if isinstance(match, str) else (match[0] or match[1])
         if path and not re.search(r'[}{><"\']', path) and path != '/':
@@ -328,7 +390,7 @@ print(f'{dark_red}{"─" * 60}{end}')
 then = time.time()
 
 # Seed from robots.txt, sitemap.xml (and optionally Wayback Machine)
-zap(main_url, args.archive, domain, host, internal, robots, proxies)
+zap(main_url, args.archive, domain, host, internal, robots, proxies, headers)
 internal.add(main_url)
 
 internal = set(remove_regex(internal, args.exclude))
@@ -396,12 +458,19 @@ minutes, seconds, _ = timer(diff, processed)
 # ── Save results ───────────────────────────────────────────────────────────────
 os.makedirs(output_dir, exist_ok=True)
 
-datasets      = [files, intel, robots, custom, failed, internal,
-                 scripts, external, fuzzable, endpoints, keys]
-dataset_names = ['files', 'intel', 'robots', 'custom', 'failed', 'internal',
-                 'scripts', 'external', 'fuzzable', 'endpoints', 'keys']
+datasets      = [files, intel, robots, custom, failed, skipped, redirects,
+                 internal, scripts, external, fuzzable, endpoints, keys]
+dataset_names = ['files', 'intel', 'robots', 'custom', 'failed', 'skipped',
+                 'redirects', 'internal', 'scripts', 'external', 'fuzzable',
+                 'endpoints', 'keys']
 
 writer(datasets, dataset_names, output_dir)
+
+visited_count = len(processed) - 1
+stats_summary = stats.snapshot(visited=visited_count)
+writer([{
+    f'{name}={value}' for name, value in sorted(stats_summary.items())
+}], ['stats'], output_dir)
 
 # ── Print summary ──────────────────────────────────────────────────────────────
 print(f'\n{dark_red}{"─" * 60}{end}')
@@ -409,19 +478,23 @@ for dataset, name in zip(datasets, dataset_names):
     if dataset:
         print(f'{blood}{name.capitalize()}: {len(dataset)}')
 print(f'{dark_red}{"─" * 60}{end}')
-print(f'{fang}Total URLs visited : {len(processed) - 1}')
+print(f'{fang}Total URLs visited : {visited_count}')
 print(f'{fang}Time elapsed       : {minutes}m {seconds}s')
 if diff > 0:
-    print(f'{fang}Requests per second: {int((len(processed) - 1) / diff)}')
+    print(f'{fang}Requests per second: {int(visited_count / diff)}')
+print(f'{fang}Blood trails       : {stats_summary["redirects"]} redirect(s)')
+print(f'{fang}Dry morsels        : {stats_summary["skipped"]} skipped response(s)')
+print(f'{fang}Failed feedings    : {stats_summary["failures"]} request failure(s)')
 
 # ── Optional extras ────────────────────────────────────────────────────────────
 datasets_dict = {
-    'files':     list(files),    'intel':     list(intel),
-    'robots':    list(robots),   'custom':    list(custom),
-    'failed':    list(failed),   'internal':  list(internal),
-    'scripts':   list(scripts),  'external':  list(external),
-    'fuzzable':  list(fuzzable), 'endpoints': list(endpoints),
-    'keys':      list(keys),
+    'files':     sorted(files),    'intel':     sorted(intel),
+    'robots':    sorted(robots),   'custom':    sorted(custom),
+    'failed':    sorted(failed),   'skipped':   sorted(skipped),
+    'redirects': sorted(redirects), 'internal': sorted(internal),
+    'scripts':   sorted(scripts),  'external':  sorted(external),
+    'fuzzable':  sorted(fuzzable), 'endpoints': sorted(endpoints),
+    'keys':      sorted(keys),     'stats':     stats_summary,
 }
 
 if args.dns:
@@ -444,7 +517,7 @@ if args.dns:
         if subdomains:
             print(f'{blood}Found {len(subdomains)} bloodline(s)')
             writer([subdomains], ['subdomains'], output_dir)
-            datasets_dict['subdomains'] = list(subdomains)
+            datasets_dict['subdomains'] = sorted(subdomains)
     except Exception as e:
         print(f'{coffin}Subdomain enumeration failed: {e}')
 
@@ -456,5 +529,10 @@ print(f'\n{blood}The harvest is complete. '
       f'Loot interred in {bold}{green}{output_dir}{end}')
 
 if args.std and args.std in datasets_dict:
-    for item in datasets_dict[args.std]:
-        sys.stdout.write(str(item) + '\n')
+    selected = datasets_dict[args.std]
+    if isinstance(selected, dict):
+        for name, value in sorted(selected.items()):
+            sys.stdout.write(f'{name}={value}\n')
+    else:
+        for item in selected:
+            sys.stdout.write(str(item) + '\n')

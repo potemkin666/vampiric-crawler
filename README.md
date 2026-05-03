@@ -95,6 +95,7 @@ python vampire.py -u <URL> [options]
 |---|---|
 | `-c COOKIE` | Cookie header value |
 | `--user-agent UA` | Custom user agent(s), comma-separated |
+| `-H "Key: Value"` | Add a custom header (repeatable) |
 | `-p HOST:PORT` | Proxy or proxies (comma-separated) |
 
 ### Output Options
@@ -124,6 +125,9 @@ python vampire.py -u https://example.com --wayback --dns
 # Use a proxy and a custom cookie
 python vampire.py -u https://example.com -p 127.0.0.1:8080 -c "session=abc123"
 
+# Send custom headers with every nocturnal request
+python vampire.py -u https://example.com -H "Authorization: Bearer token" -H "X-Night: eternal"
+
 # Only collect URLs with parameters (fuzzable), pipe to another tool
 python vampire.py -u https://example.com --only-urls --stdout fuzzable
 
@@ -150,6 +154,9 @@ example.com/
 ├── robots.txt      # robots.txt entries
 ├── custom.txt      # Custom regex matches
 ├── failed.txt      # URLs that could not be fetched
+├── skipped.txt     # Responses skipped before extraction
+├── redirects.txt   # Redirect trails followed during the crawl
+├── stats.txt       # Crawl counters and telemetry
 ├── subdomains.txt  # (--dns only)
 ├── results.json    # (-e json only)
 └── results.csv     # (-e csv only)

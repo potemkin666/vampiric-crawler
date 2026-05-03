@@ -2,6 +2,7 @@
 import math
 import re
 import sys
+import threading
 
 import core.config
 from core.colors import crypt
@@ -185,7 +186,119 @@ def extract_headers(raw):
     headers = {}
     for line in raw.splitlines():
         line = line.strip()
-        if ':' in line:
-            key, _, value = line.partition(':')
-            headers[key.strip()] = value.strip()
+        if not line:
+            continue
+        if ':' not in line:
+            raise ValueError('Header values must use "Key: Value" format.')
+        key, _, value = line.partition(':')
+        headers[key.strip()] = value.strip()
     return headers
+
+
+# ---------------------------------------------------------------------------
+# Content-type helpers
+# ---------------------------------------------------------------------------
+
+_MARKUP_CONTENT_TYPES = (
+    'text/html',
+    'application/xhtml+xml',
+    'application/xml',
+    'text/xml',
+)
+
+_SCRIPT_CONTENT_HINTS = (
+    'javascript',
+    'ecmascript',
+)
+
+_SKIPPED_CONTENT_PREFIXES = (
+    'image/',
+    'audio/',
+    'video/',
+    'font/',
+)
+
+_SKIPPED_CONTENT_TYPES = frozenset((
+    'application/octet-stream',
+    'application/pdf',
+    'application/zip',
+    'application/x-zip-compressed',
+    'application/x-7z-compressed',
+    'application/x-rar-compressed',
+))
+
+
+def normalize_content_type(raw):
+    """Return the normalized MIME type from a Content-Type header."""
+    if not raw:
+        return ''
+    return raw.split(';', 1)[0].strip().lower()
+
+
+def should_extract_markup(content_type):
+    """Return True if *content_type* should be parsed like a page."""
+    if not content_type:
+        return True
+    if content_type.startswith(_MARKUP_CONTENT_TYPES):
+        return True
+    return content_type.startswith('text/')
+
+
+def should_extract_script(content_type):
+    """Return True if *content_type* should be parsed like script/text."""
+    if not content_type:
+        return True
+    if any(hint in content_type for hint in _SCRIPT_CONTENT_HINTS):
+        return True
+    return content_type in ('application/json', 'text/plain')
+
+
+def skip_reason_for_content_type(content_type):
+    """Return a machine-readable skip reason for *content_type* or None."""
+    if not content_type:
+        return None
+    if content_type.startswith(_SKIPPED_CONTENT_PREFIXES):
+        return 'binary-content'
+    if content_type in _SKIPPED_CONTENT_TYPES:
+        return 'binary-content'
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Crawl stats
+# ---------------------------------------------------------------------------
+
+_STAT_KEYS = (
+    'requests',
+    'successes',
+    'redirects',
+    'failures',
+    'client_errors',
+    'server_errors',
+    'skipped',
+    'binary_skips',
+    'empty_responses',
+    'markup_pages',
+    'script_pages',
+)
+
+
+class CrawlStats(object):
+    """Thread-safe crawl counters."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = {key: 0 for key in _STAT_KEYS}
+
+    def bump(self, key, amount=1):
+        """Increase *key* by *amount*."""
+        with self._lock:
+            self._counts[key] = self._counts.get(key, 0) + amount
+
+    def snapshot(self, visited=None):
+        """Return a stable summary of the current counters."""
+        with self._lock:
+            counts = dict(self._counts)
+        if visited is not None:
+            counts['visited'] = visited
+        return counts
