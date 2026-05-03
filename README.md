@@ -90,7 +90,12 @@ Double-click web UI launcher:
 🦇 Double-Click to Start Vampiric Web UI.bat
 ```
 
-If you double-click the crawler launcher instead of passing flags in a terminal, it now stays open, tells you exactly what to do, prompts for the target URL, and waits for a key press before closing.
+If you double-click the crawler launcher instead of passing flags in a terminal:
+
+- the window stays open
+- it tells you exactly what to do
+- it prompts for the target URL
+- it waits for a key press before closing
 
 ## Usage
 
