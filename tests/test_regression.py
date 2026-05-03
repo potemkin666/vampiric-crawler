@@ -707,6 +707,7 @@ class RegressionTests(unittest.TestCase):
                 report_response = client.get('/api/exports/report')
                 self.assertEqual(report_response.status_code, 200)
                 self.assertIn('SEALED RECORD', report_response.get_data(as_text=True))
+                report_response.close()
 
 
 if __name__ == '__main__':
