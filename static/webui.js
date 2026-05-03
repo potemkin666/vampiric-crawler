@@ -224,12 +224,6 @@ function renderState(data) {
   els.app.dataset.status = state.status;
   els.statusMessage.textContent = data.status_message || 'THE CRAWLER SLEEPS';
   els.asciiMeter.textContent = buildMeter(data);
-  if (data.mode) {
-    els.crawlMode.value = data.mode;
-  }
-  if (data.mode_label || data.mode_description) {
-    els.modeHint.textContent = `${data.mode_label || ''}${data.mode_description ? ` // ${data.mode_description}` : ''}`.trim();
-  }
   renderSummary(data);
   els.liveFeed.textContent = (data.feed && data.feed.length) ? data.feed.join('\n') : 'Awaiting target acquisition…';
   els.errorConsole.textContent = (data.errors && data.errors.length)
@@ -332,6 +326,16 @@ function attachDecryptHover() {
 
 ['input', 'change'].forEach((eventName) => {
   els.form.addEventListener(eventName, renderCommandPreview);
+});
+els.form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  beginCrawl();
+});
+els.form.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  if (event.target instanceof HTMLTextAreaElement) return;
+  event.preventDefault();
+  beginCrawl();
 });
 els.crawlMode.addEventListener('change', syncModeControls);
 
