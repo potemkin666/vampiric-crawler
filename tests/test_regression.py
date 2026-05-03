@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ from core.utils import (
     top_level,
 )
 from plugins.exporter import exporter
+from webapp import CrawlRun, build_crawl_command, create_app
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -634,6 +636,77 @@ class RegressionTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_web_ui_build_crawl_command_maps_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = os.path.join(tmpdir, 'record')
+            checkpoint = os.path.join(output_dir, 'checkpoint.json')
+            os.makedirs(output_dir)
+            command = build_crawl_command(
+                {
+                    'target_url': 'https://example.com',
+                    'depth': 3,
+                    'threads': 6,
+                    'delay': 0.5,
+                    'timeout': 9,
+                    'scope': 'domain',
+                    'extract_intel': False,
+                    'extract_secrets': True,
+                    'respect_robots_delay': True,
+                    'render_js': True,
+                    'archive_seeds': True,
+                    'enumerate_subdomains': True,
+                },
+                output_dir=os.path.abspath(output_dir),
+                checkpoint_path=os.path.abspath(checkpoint),
+            )
+        rendered = ' '.join(command)
+        self.assertIn('-u https://example.com', rendered)
+        self.assertIn('-l 3', rendered)
+        self.assertIn('-t 6', rendered)
+        self.assertIn('--scope domain', rendered)
+        self.assertIn('--respect-robots-delay', rendered)
+        self.assertIn('--render-js', rendered)
+        self.assertIn('--wayback', rendered)
+        self.assertIn('--dns', rendered)
+        self.assertIn('--keys', rendered)
+        self.assertIn('--only-urls', rendered)
+
+    def test_web_ui_state_and_export_routes_surface_sealed_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(Path(tmpdir))
+            manager = app.config['CRAWL_MANAGER']
+            output_dir = Path(tmpdir) / 'record'
+            output_dir.mkdir()
+            checkpoint = output_dir / 'checkpoint.json'
+            (output_dir / 'internal.txt').write_text('https://example.com/\nhttps://example.com/about\n', encoding='utf-8')
+            (output_dir / 'files.txt').write_text('https://example.com/report.pdf\nhttps://example.com/app.js.map\n', encoding='utf-8')
+            (output_dir / 'intel.txt').write_text('https://example.com:EMAIL:test@example.com\n', encoding='utf-8')
+            (output_dir / 'failed.txt').write_text('https://example.com/admin\n', encoding='utf-8')
+            (output_dir / 'stats.txt').write_text('visited=2\nfailures=1\nredirects=0\n', encoding='utf-8')
+            manager.current_run = CrawlRun(
+                run_id='sealed-record',
+                payload={'target_url': 'https://example.com', 'depth': 2, 'threads': 4},
+                output_dir=output_dir,
+                checkpoint_path=checkpoint,
+                command=[sys.executable, os.path.join(REPO_ROOT, 'vampire.py')],
+                status='complete',
+                status_detail='CRAWL SEALED',
+                ended_at='2026-05-03T09:16:06+00:00',
+            )
+
+            with app.test_client() as client:
+                state_response = client.get('/api/state')
+                self.assertEqual(state_response.status_code, 200)
+                state_data = state_response.get_json()
+                self.assertEqual(state_data['status'], 'complete')
+                self.assertEqual(state_data['summary']['document_tombs'], 1)
+                self.assertEqual(state_data['summary']['mail_sigils'], 1)
+                self.assertTrue(any(item['kind'] == 'report' for item in state_data['exports']))
+
+                report_response = client.get('/api/exports/report')
+                self.assertEqual(report_response.status_code, 200)
+                self.assertIn('SEALED RECORD', report_response.get_data(as_text=True))
 
 
 if __name__ == '__main__':

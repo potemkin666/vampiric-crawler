@@ -43,6 +43,15 @@ pip install -r requirements.txt
 python vampire.py -u https://example.com
 ```
 
+### Web crawler console
+
+```bash
+pip install -r requirements.txt
+python webapp.py
+```
+
+Then open `http://127.0.0.1:8080` for the gothic DOS crawler console. The web UI wraps the existing crawler CLI, streams live crawl output, preserves exports, and writes each run under `webui_runs/`.
+
 ### Launcher scripts
 
 Linux/macOS:
@@ -51,10 +60,22 @@ Linux/macOS:
 ./launch.sh -u https://example.com
 ```
 
+Web UI:
+
+```bash
+./launch-web.sh
+```
+
 Windows:
 
 ```cmd
 launch.bat -u https://example.com
+```
+
+Web UI:
+
+```cmd
+launch-web.bat
 ```
 
 If you double-click the launcher instead of passing flags in a terminal, it will prompt for the target URL first.
