@@ -470,12 +470,12 @@ class CrawlManager:
                 raise RuntimeError('A crawl rite is already in progress.')
             payload = dict(payload)
             payload['mode'] = coerce_mode(payload.get('mode'))
-            if payload['mode'] == 'temporal' and not payload.get('temporal_baseline'):
-                baseline = self._latest_baseline(payload.get('target_url', ''))
-                if baseline is not None:
-                    payload['temporal_baseline'] = str(baseline.resolve())
             run_id = f'{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}-{slugify_target(payload.get("target_url", ""))}-{uuid.uuid4().hex[:6]}'
             output_dir = self.runs_root / run_id
+            if payload['mode'] == 'temporal' and not payload.get('temporal_baseline'):
+                baseline = self._latest_baseline(payload.get('target_url', ''), exclude_dir=output_dir)
+                if baseline is not None:
+                    payload['temporal_baseline'] = str(baseline.resolve())
             output_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_path = output_dir / 'checkpoint.json'
             command = build_crawl_command(payload, output_dir, checkpoint_path)
@@ -503,11 +503,13 @@ class CrawlManager:
             thread.start()
             return run
 
-    def _latest_baseline(self, target_url: str) -> Path | None:
+    def _latest_baseline(self, target_url: str, exclude_dir: Path | None = None) -> Path | None:
         target_slug = slugify_target(target_url)
         candidates = []
         for entry in self.runs_root.iterdir():
             if not entry.is_dir() or target_slug not in entry.name:
+                continue
+            if exclude_dir is not None and entry == exclude_dir:
                 continue
             if self.current_run and entry == self.current_run.output_dir:
                 continue

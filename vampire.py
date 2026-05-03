@@ -146,6 +146,7 @@ scope_mode = args.scope
 checkpoint_path = args.checkpoint or args.resume
 mode = coerce_mode(resume_state.get('mode') if resume_state and '--mode' not in sys.argv[1:] else args.mode)
 temporal_baseline = args.temporal_baseline
+document_depth_forced = mode == 'document' and crawl_level < 1
 dataset_names = [
     'files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped',
     'redirects', 'internal', 'scripts', 'external', 'fuzzable',
@@ -596,6 +597,8 @@ print(f'{fang}Target locked: {bold}{main_url}{end}')
 if resume_state:
     print(f'{fang}Rising from checkpoint: {bold}{args.resume}{end}')
 print(f'{fang}The hunt begins… depth={crawl_level}, threads={thread_count}, delay={delay}s, scope={scope_mode}, mode={mode}')
+if document_depth_forced:
+    print(f'{crypt}Document harvester raised crawl depth to 1 so it can reach linked document tombs.')
 print(f'{dark_red}{"─" * 60}{end}')
 then = time.time()
 
@@ -686,20 +689,24 @@ diff = now - then
 minutes, seconds, _ = timer(diff, processed)
 
 os.makedirs(output_dir, exist_ok=True)
-baseline_dir = temporal_baseline
-if not baseline_dir and mode == 'temporal' and snapshot_exists(output_dir):
-    baseline_dir = output_dir
+previous_snapshot = {}
+if mode == 'temporal':
+    baseline_dir = temporal_baseline
+    if baseline_dir and snapshot_exists(baseline_dir):
+        previous_snapshot = load_previous_snapshot(baseline_dir)
+    elif snapshot_exists(output_dir):
+        previous_snapshot = load_previous_snapshot(output_dir)
 datasets = [
     files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
     document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
 ]
-if mode == 'temporal' and baseline_dir:
+if mode == 'temporal' and previous_snapshot:
     current_snapshot = {
         name: sorted(dataset)
         for name, dataset in zip(dataset_names, datasets)
     }
     current_snapshot['stats'] = stats.snapshot(visited=len(processed))
-    temporal_diffs.update(build_temporal_diffs(load_previous_snapshot(baseline_dir), current_snapshot))
+    temporal_diffs.update(build_temporal_diffs(previous_snapshot, current_snapshot))
 elif mode == 'temporal':
     temporal_diffs.add('dataset=temporal_diffs change=baseline-missing value=No prior snapshot found')
 writer(datasets, dataset_names, output_dir)
