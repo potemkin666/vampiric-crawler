@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
+from core.modes import MODE_DATASET_NAMES, MODE_DEFINITIONS, coerce_mode
 from plugins.exporter import exporter
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -44,6 +45,7 @@ DATASET_FILES = (
     'redirects',
     'stats',
     'subdomains',
+    *MODE_DATASET_NAMES,
 )
 TEXT_LIMIT = 250
 STATUS_MESSAGES = {
@@ -106,6 +108,18 @@ def filter_mail_sigils(items: list[str]) -> list[str]:
     return [item for item in items if 'EMAIL:' in item]
 
 
+def mode_label(mode: str) -> str:
+    return MODE_DEFINITIONS.get(coerce_mode(mode), MODE_DEFINITIONS['generic'])['label']
+
+
+def mode_description(mode: str) -> str:
+    return MODE_DEFINITIONS.get(coerce_mode(mode), MODE_DEFINITIONS['generic'])['description']
+
+
+def count_unique_scam_signal_types(items: list[str]) -> int:
+    return len({item.split(' signal=', 1)[-1].split(' ', 1)[0] for item in items})
+
+
 def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_path: Path) -> list[str]:
     target_url = (payload.get('target_url') or '').strip()
     if not target_url:
@@ -118,6 +132,7 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
     scope = payload.get('scope', 'host')
     if scope not in ('host', 'domain'):
         raise ValueError('Invalid scope.')
+    mode = coerce_mode(payload.get('mode'))
 
     command = [
         sys.executable,
@@ -135,6 +150,8 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         str(timeout),
         '--scope',
         scope,
+        '--mode',
+        mode,
         '--checkpoint',
         str(checkpoint_path),
         '-o',
@@ -154,11 +171,16 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         command.append('--keys')
     if not payload.get('extract_intel', True):
         command.append('--only-urls')
+    if payload.get('temporal_baseline'):
+        command.extend(['--temporal-baseline', str(payload['temporal_baseline'])])
     return command
 
 
 def command_preview(payload: dict[str, Any]) -> str:
+    mode = coerce_mode(payload.get('mode'))
     preview = f'CRAWL {(payload.get("target_url") or "").strip()} --depth {int(payload.get("depth", 2))}'
+    if mode != 'generic':
+        preview += f' --mode {mode}'
     if payload.get('scope', 'host') == 'domain':
         preview += ' --scope domain'
     if payload.get('render_js'):
@@ -234,6 +256,9 @@ class CrawlRun:
             'status_message': STATUS_MESSAGES.get(visible_status, STATUS_MESSAGES['idle']),
             'status_detail': self.status_detail,
             'target_url': self.payload.get('target_url', ''),
+            'mode': coerce_mode(self.payload.get('mode')),
+            'mode_label': mode_label(self.payload.get('mode')),
+            'mode_description': mode_description(self.payload.get('mode')),
             'command_preview': command_preview(self.payload),
             'command': self.command,
             'started_at': self.started_at,
@@ -246,7 +271,7 @@ class CrawlRun:
             'feed': feed,
             'errors': errors,
             'summary': build_summary(self.payload, datasets, stats),
-            'panels': build_panels(datasets, stats),
+            'panels': build_panels(self.payload, datasets, stats),
             'exports': build_exports(self.output_dir),
             'sealed_records': history,
         }
@@ -282,8 +307,12 @@ def collect_run_artifacts(output_dir: Path, checkpoint_path: Path) -> tuple[dict
 
 
 def build_summary(payload: dict[str, Any], datasets: dict[str, list[str]], stats: dict[str, Any]) -> dict[str, Any]:
-    return {
+    mode = coerce_mode(payload.get('mode'))
+    summary = {
         'target': payload.get('target_url', ''),
+        'mode': mode,
+        'mode_label': mode_label(mode),
+        'mode_description': mode_description(mode),
         'depth': int(payload.get('depth', 2)),
         'threads': int(payload.get('threads', 4)),
         'visited': int(stats.get('visited', 0) or 0),
@@ -295,22 +324,92 @@ def build_summary(payload: dict[str, Any], datasets: dict[str, list[str]], stats
         'document_tombs': len(filter_documents(datasets.get('files', []))),
         'broken_gates': len(datasets.get('failed', [])),
         'source_vitals': stats,
+        'summary_cards': build_summary_cards(mode, datasets, stats),
     }
+    return summary
 
 
-def build_panels(datasets: dict[str, list[str]], stats: dict[str, Any]) -> list[dict[str, Any]]:
-    failed = datasets.get('failed', [])
-    panels = [
-        {'key': 'links', 'title': 'LINKS UNEARTHED', 'count': len(datasets.get('internal', [])), 'items': datasets.get('internal', [])[:TEXT_LIMIT]},
-        {'key': 'mail', 'title': 'MAIL SIGILS', 'count': len(filter_mail_sigils(datasets.get('intel', []))), 'items': filter_mail_sigils(datasets.get('intel', []))[:TEXT_LIMIT]},
-        {'key': 'documents', 'title': 'DOCUMENT TOMBS', 'count': len(filter_documents(datasets.get('files', []))), 'items': filter_documents(datasets.get('files', []))[:TEXT_LIMIT]},
-        {'key': 'relics', 'title': 'RELICS FOUND', 'count': len(datasets.get('files', [])), 'items': datasets.get('files', [])[:TEXT_LIMIT]},
-        {'key': 'scripts', 'title': 'SCRIPT BONES', 'count': len(datasets.get('scripts', [])), 'items': datasets.get('scripts', [])[:TEXT_LIMIT]},
-        {'key': 'broken', 'title': 'BROKEN GATES', 'count': len(failed), 'items': failed[:TEXT_LIMIT]},
-        {'key': 'forms', 'title': 'RITUAL FORMS', 'count': len(datasets.get('forms', [])), 'items': datasets.get('forms', [])[:TEXT_LIMIT]},
-        {'key': 'vitals', 'title': 'SOURCE VITALS', 'count': len(stats), 'items': [f'{key}={value}' for key, value in sorted(stats.items())][:TEXT_LIMIT]},
+def build_summary_cards(mode: str, datasets: dict[str, list[str]], stats: dict[str, Any]) -> list[dict[str, Any]]:
+    cards = [
+        {'label': 'LINKS', 'value': len(datasets.get('internal', []))},
+        {'label': 'RELICS', 'value': len(datasets.get('files', []))},
+        {'label': 'MAIL', 'value': len(filter_mail_sigils(datasets.get('intel', [])))},
+        {'label': 'OMENS', 'value': int(stats.get('failures', len(datasets.get('failed', []))) or 0)},
     ]
-    return panels
+    mode_cards = {
+        'document': [
+            {'label': 'TOMBS', 'value': len(datasets.get('document_metadata', []))},
+            {'label': 'LEAKS', 'value': len(datasets.get('document_leaks', []))},
+        ],
+        'js-intel': [
+            {'label': 'SIGILS', 'value': len(datasets.get('js_intel', []))},
+            {'label': 'SCRIPTS', 'value': len(datasets.get('scripts', []))},
+        ],
+        'forum': [
+            {'label': 'THREADS', 'value': len(datasets.get('threads', []))},
+            {'label': 'REPLIES', 'value': len([item for item in datasets.get('threads', []) if 'reply_to=' in item])},
+        ],
+        'geo': [
+            {'label': 'PLACES', 'value': len(datasets.get('locations', []))},
+            {'label': 'MAP', 'value': len([item for item in datasets.get('locations', []) if 'lat=' in item and 'lon=' in item])},
+        ],
+        'news': [
+            {'label': 'STORIES', 'value': len([item for item in datasets.get('stories', []) if ' title=' in item])},
+            {'label': 'REFS', 'value': len([item for item in datasets.get('stories', []) if 'reference=' in item])},
+        ],
+        'hidden': [
+            {'label': 'SHADOWS', 'value': len(datasets.get('hidden_paths', []))},
+            {'label': 'ENDPTS', 'value': len(datasets.get('endpoints', []))},
+        ],
+        'scam': [
+            {'label': 'HEXES', 'value': len(datasets.get('scam_signals', []))},
+            {'label': 'RUSES', 'value': count_unique_scam_signal_types(datasets.get('scam_signals', []))},
+        ],
+        'temporal': [
+            {'label': 'DIFFS', 'value': len(datasets.get('temporal_diffs', []))},
+            {'label': 'VISITED', 'value': int(stats.get('visited', 0) or 0)},
+        ],
+    }
+    cards.extend(mode_cards.get(mode, [{'label': 'DOCS', 'value': len(filter_documents(datasets.get('files', [])))}, {'label': 'SCRIPTS', 'value': len(datasets.get('scripts', []))}]))
+    return cards[:6]
+
+
+def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats: dict[str, Any]) -> list[dict[str, Any]]:
+    mode = coerce_mode(payload.get('mode'))
+    failed = datasets.get('failed', [])
+    panels = {
+        'links': {'key': 'links', 'title': 'CRYPT PATHS', 'count': len(datasets.get('internal', [])), 'items': datasets.get('internal', [])[:TEXT_LIMIT]},
+        'mail': {'key': 'mail', 'title': 'MAIL SIGILS', 'count': len(filter_mail_sigils(datasets.get('intel', []))), 'items': filter_mail_sigils(datasets.get('intel', []))[:TEXT_LIMIT]},
+        'documents': {'key': 'documents', 'title': 'DOCUMENT TOMBS', 'count': len(filter_documents(datasets.get('files', []))), 'items': filter_documents(datasets.get('files', []))[:TEXT_LIMIT]},
+        'relics': {'key': 'relics', 'title': 'RELIC RELIQUARY', 'count': len(datasets.get('files', [])), 'items': datasets.get('files', [])[:TEXT_LIMIT]},
+        'scripts': {'key': 'scripts', 'title': 'SCRIPT BONES', 'count': len(datasets.get('scripts', [])), 'items': datasets.get('scripts', [])[:TEXT_LIMIT]},
+        'broken': {'key': 'broken', 'title': 'BROKEN GATES', 'count': len(failed), 'items': failed[:TEXT_LIMIT]},
+        'forms': {'key': 'forms', 'title': 'RITUAL FORMS', 'count': len(datasets.get('forms', [])), 'items': datasets.get('forms', [])[:TEXT_LIMIT]},
+        'vitals': {'key': 'vitals', 'title': 'NIGHT VITALS', 'count': len(stats), 'items': [f'{key}={value}' for key, value in sorted(stats.items())][:TEXT_LIMIT]},
+        'document_metadata': {'key': 'document_metadata', 'title': 'PARCHMENT METADATA', 'count': len(datasets.get('document_metadata', [])), 'items': datasets.get('document_metadata', [])[:TEXT_LIMIT]},
+        'document_leaks': {'key': 'document_leaks', 'title': 'ARCHIVE LEAKS', 'count': len(datasets.get('document_leaks', [])), 'items': datasets.get('document_leaks', [])[:TEXT_LIMIT]},
+        'js_intel': {'key': 'js_intel', 'title': 'ARCANE JS SIGILS', 'count': len(datasets.get('js_intel', [])), 'items': datasets.get('js_intel', [])[:TEXT_LIMIT]},
+        'threads': {'key': 'threads', 'title': 'THREAD NECROLOGY', 'count': len(datasets.get('threads', [])), 'items': datasets.get('threads', [])[:TEXT_LIMIT]},
+        'locations': {'key': 'locations', 'title': 'BLOOD MAP POINTS', 'count': len(datasets.get('locations', [])), 'items': datasets.get('locations', [])[:TEXT_LIMIT]},
+        'stories': {'key': 'stories', 'title': 'MUTATING STORY CHAINS', 'count': len(datasets.get('stories', [])), 'items': datasets.get('stories', [])[:TEXT_LIMIT]},
+        'hidden_paths': {'key': 'hidden_paths', 'title': 'SHADOW GATES', 'count': len(datasets.get('hidden_paths', [])), 'items': datasets.get('hidden_paths', [])[:TEXT_LIMIT]},
+        'scam_signals': {'key': 'scam_signals', 'title': 'HEXED MERCHANT OMENS', 'count': len(datasets.get('scam_signals', [])), 'items': datasets.get('scam_signals', [])[:TEXT_LIMIT]},
+        'temporal_diffs': {'key': 'temporal_diffs', 'title': 'TIME-SLICE OMENS', 'count': len(datasets.get('temporal_diffs', [])), 'items': datasets.get('temporal_diffs', [])[:TEXT_LIMIT]},
+    }
+    mode_layout = {
+        'document': ['document_metadata', 'document_leaks', 'documents', 'links', 'vitals'],
+        'js-intel': ['js_intel', 'scripts', 'links', 'relics', 'vitals'],
+        'forum': ['threads', 'links', 'mail', 'vitals'],
+        'geo': ['locations', 'links', 'vitals'],
+        'news': ['stories', 'links', 'vitals'],
+        'hidden': ['hidden_paths', 'links', 'broken', 'vitals'],
+        'scam': ['scam_signals', 'links', 'forms', 'vitals'],
+        'temporal': ['temporal_diffs', 'links', 'vitals'],
+        'generic': ['links', 'mail', 'documents', 'relics', 'scripts', 'broken', 'forms', 'vitals'],
+    }
+    ordered_keys = mode_layout.get(mode, mode_layout['generic'])
+    selected = [panels[key] for key in ordered_keys if panels[key]['count'] or key == 'vitals']
+    return selected
 
 
 def build_exports(output_dir: Path) -> list[dict[str, str]]:
@@ -349,7 +448,7 @@ def ensure_exports(run: CrawlRun) -> None:
         f'BROKEN GATES={len(datasets.get("failed", []))}',
         '',
     ]
-    for panel in build_panels(datasets, stats):
+    for panel in build_panels(run.payload, datasets, stats):
         report_lines.append(f'[{panel["title"]}]')
         report_lines.extend(panel['items'][:50] or ['THE ARCHIVE IS SILENT'])
         report_lines.append('')
@@ -369,8 +468,14 @@ class CrawlManager:
         with self._lock:
             if self.current_run and self.current_run.status in {'running', 'paused', 'stopping'}:
                 raise RuntimeError('A crawl rite is already in progress.')
+            payload = dict(payload)
+            payload['mode'] = coerce_mode(payload.get('mode'))
             run_id = f'{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}-{slugify_target(payload.get("target_url", ""))}-{uuid.uuid4().hex[:6]}'
             output_dir = self.runs_root / run_id
+            if payload['mode'] == 'temporal' and not payload.get('temporal_baseline'):
+                baseline = self._latest_baseline(payload.get('target_url', ''), exclude_dir=output_dir)
+                if baseline is not None:
+                    payload['temporal_baseline'] = str(baseline.resolve())
             output_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_path = output_dir / 'checkpoint.json'
             command = build_crawl_command(payload, output_dir, checkpoint_path)
@@ -398,6 +503,19 @@ class CrawlManager:
             thread.start()
             return run
 
+    def _latest_baseline(self, target_url: str, exclude_dir: Path | None = None) -> Path | None:
+        target_slug = slugify_target(target_url)
+        candidates = []
+        for entry in self.runs_root.iterdir():
+            if not entry.is_dir() or target_slug not in entry.name:
+                continue
+            if exclude_dir is not None and entry == exclude_dir:
+                continue
+            if self.current_run and entry == self.current_run.output_dir:
+                continue
+            candidates.append(entry)
+        return sorted(candidates)[-1] if candidates else None
+
     def _monitor_run(self, run: CrawlRun) -> None:
         assert run.process is not None
         if run.process.stdout is not None:
@@ -423,6 +541,7 @@ class CrawlManager:
         self.history.appendleft({
             'id': run.run_id,
             'target_url': run.payload.get('target_url', ''),
+            'mode': coerce_mode(run.payload.get('mode')),
             'ended_at': run.ended_at,
             'status': run.status,
             'status_message': STATUS_MESSAGES.get(run.status, STATUS_MESSAGES['idle']),
@@ -468,12 +587,15 @@ class CrawlManager:
                 'status_message': STATUS_MESSAGES['idle'],
                 'status_detail': 'Awaiting a target URL.',
                 'target_url': '',
+                'mode': 'generic',
+                'mode_label': mode_label('generic'),
+                'mode_description': mode_description('generic'),
                 'command_preview': 'CRAWL https://example.com --depth 2',
                 'logs': [],
                 'feed': [],
                 'errors': [],
                 'summary': build_summary({}, {}, {}),
-                'panels': build_panels({}, {}),
+                'panels': build_panels({}, {}, {}),
                 'exports': [],
                 'sealed_records': list(self.history),
                 'can_pause': False,

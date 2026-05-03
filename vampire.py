@@ -17,6 +17,7 @@
 from __future__ import print_function
 
 import argparse
+import json
 import os
 import random
 import re
@@ -24,7 +25,7 @@ import sys
 import threading
 import time
 import warnings
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 warnings.filterwarnings('ignore')
 
@@ -37,6 +38,14 @@ import core.config
 from core.config import INTELS
 from core.extractors import run_page_extractors, run_script_extractors
 from core.flash import flash
+from core.modes import (
+    DOCUMENT_EXTENSIONS,
+    MODE_DATASET_NAMES,
+    build_hidden_candidates,
+    build_temporal_diffs,
+    coerce_mode,
+    extract_document_records,
+)
 from core.politeness import PolitenessController
 from core.render import render_page
 from core.requester import requester, get_session
@@ -46,6 +55,7 @@ from core.utils import (
     is_in_scope,
     normalize_fuzzable_url,
     normalize_url,
+    normalize_content_type,
     proxy_type,
     remove_regex,
     should_extract_markup,
@@ -96,10 +106,12 @@ parser.add_argument('--only-urls', help='Only harvest URLs, skip intel extractio
 parser.add_argument('--scope', help='Scope of the hunt: exact host or full registered domain', dest='scope', choices=['host', 'domain'], default='host')
 parser.add_argument('--scope-allow', help='Extra regex that URLs must match to stay in scope (repeatable)', action='append', default=[])
 parser.add_argument('--scope-deny', help='Regex that forces URLs out of scope even if host/domain matches (repeatable)', action='append', default=[])
+parser.add_argument('--mode', help='Focused crawl mode (default: generic)', choices=['generic', 'document', 'js-intel', 'forum', 'geo', 'news', 'hidden', 'scam', 'temporal'], default='generic')
 parser.add_argument('--render-js', help='Render pages in headless Chromium before extraction', action='store_true')
 parser.add_argument('--render-timeout', help='Per-page render timeout in seconds (default: 12)', type=float, default=12)
 parser.add_argument('--checkpoint', help='Write crawl state to this checkpoint file')
 parser.add_argument('--resume', help='Resume a previous crawl from this checkpoint file')
+parser.add_argument('--temporal-baseline', help='Directory containing a prior crawl snapshot for temporal diff mode')
 parser.add_argument('--respect-robots-delay', help='Honor robots.txt Crawl-delay when present', action='store_true')
 parser.add_argument('--host-concurrency', help='Maximum concurrent requests per host (default: 2)', type=int, default=2)
 parser.add_argument('--disable-adaptive-backoff', help='Disable automatic backoff on 429/503 responses', action='store_true')
@@ -132,6 +144,19 @@ crawl_level = args.level
 thread_count = args.threads
 scope_mode = args.scope
 checkpoint_path = args.checkpoint or args.resume
+mode = coerce_mode(resume_state.get('mode') if resume_state and '--mode' not in sys.argv[1:] else args.mode)
+temporal_baseline = args.temporal_baseline
+document_depth_forced = mode == 'document' and crawl_level < 1
+dataset_names = [
+    'files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped',
+    'redirects', 'internal', 'scripts', 'external', 'fuzzable',
+    'endpoints', 'keys', *MODE_DATASET_NAMES,
+]
+
+if mode == 'js-intel':
+    api = True
+if mode == 'document':
+    crawl_level = max(crawl_level, 1)
 
 
 def compile_patterns(patterns, label):
@@ -223,6 +248,15 @@ external = set()
 fuzzable = set()
 endpoints = set()
 keys = set()
+document_metadata = set()
+document_leaks = set()
+js_intel = set()
+threads = set()
+locations = set()
+stories = set()
+hidden_paths = set()
+scam_signals = set()
+temporal_diffs = set()
 processed = set()
 bad_scripts = set()
 bad_intel = set()
@@ -245,6 +279,15 @@ if resume_state:
     fuzzable.update(restored['fuzzable'])
     endpoints.update(restored['endpoints'])
     keys.update(restored['keys'])
+    document_metadata.update(restored['document_metadata'])
+    document_leaks.update(restored['document_leaks'])
+    js_intel.update(restored['js_intel'])
+    threads.update(restored['threads'])
+    locations.update(restored['locations'])
+    stories.update(restored['stories'])
+    hidden_paths.update(restored['hidden_paths'])
+    scam_signals.update(restored['scam_signals'])
+    temporal_diffs.update(restored['temporal_diffs'])
     processed.update(restored['processed'])
     bad_scripts.update(restored['bad_scripts'])
     bad_intel.update(restored['bad_intel'])
@@ -274,6 +317,15 @@ extractor_context = {
     'forms': forms,
     'custom': custom,
     'keys': keys,
+    'document_metadata': document_metadata,
+    'document_leaks': document_leaks,
+    'js_intel': js_intel,
+    'threads': threads,
+    'locations': locations,
+    'stories': stories,
+    'hidden_paths': hidden_paths,
+    'scam_signals': scam_signals,
+    'temporal_diffs': temporal_diffs,
     'bad_scripts': bad_scripts,
     'bad_intel': bad_intel,
     'endpoints': endpoints,
@@ -288,6 +340,7 @@ extractor_context = {
     'verbose_prefix_external': f'{crypt}External page: {{url}}',
     'custom_regex': args.regex,
     'extract_secrets': api,
+    'mode': mode,
 }
 
 only_urls_context = dict(extractor_context, custom_regex=None, extract_secrets=False, bad_intel=set(), bad_scripts=set(), forms=set())
@@ -300,6 +353,7 @@ def checkpoint_payload(stage):
         'host': host,
         'domain': domain,
         'scope_mode': scope_mode,
+        'mode': mode,
         'output_dir': output_dir,
         'stats': stats.snapshot(visited=len(processed)),
         'files': sorted(files),
@@ -316,6 +370,15 @@ def checkpoint_payload(stage):
         'fuzzable': sorted(fuzzable),
         'endpoints': sorted(endpoints),
         'keys': sorted(keys),
+        'document_metadata': sorted(document_metadata),
+        'document_leaks': sorted(document_leaks),
+        'js_intel': sorted(js_intel),
+        'threads': sorted(threads),
+        'locations': sorted(locations),
+        'stories': sorted(stories),
+        'hidden_paths': sorted(hidden_paths),
+        'scam_signals': sorted(scam_signals),
+        'temporal_diffs': sorted(temporal_diffs),
         'processed': sorted(processed),
         'bad_scripts': sorted(bad_scripts),
         'bad_intel': [
@@ -418,10 +481,124 @@ def jscanner(url):
     run_script_extractors(url, result.text, extractor_context)
 
 
+def fetch_binary_document(url):
+    proxy = random.choice(proxies) if proxies else None
+    proxy_dict = proxy if proxy else None
+    ua = random.choice(user_agents) if user_agents else 'Mozilla/5.0 (compatible; VampiricCrawler/1.0)'
+    req_headers = {'User-Agent': ua}
+    if cook:
+        req_headers['Cookie'] = cook
+    if headers:
+        req_headers.update(headers)
+    session = get_session()
+    response = session.get(
+        url,
+        headers=req_headers,
+        proxies=proxy_dict,
+        timeout=timeout,
+        verify=False,
+        allow_redirects=True,
+    )
+    return response
+
+
+def harvest_documents():
+    document_urls = sorted(
+        url for url in files
+        if urlsplit(url).path.lower().endswith(tuple(DOCUMENT_EXTENSIONS))
+    )
+    if not document_urls:
+        return
+    print(f'{fang}Harvesting {len(document_urls)} document tomb{"s" if len(document_urls) != 1 else ""}…')
+    for url in document_urls:
+        stats.bump('requests')
+        try:
+            response = fetch_binary_document(url)
+        except Exception as exc:
+            failed.add(url)
+            stats.bump('failures')
+            if verbose:
+                print(f'{coffin}Could not exhume document {url}: {exc}')
+            continue
+        if response.history:
+            stats.bump('redirects', len(response.history))
+        if response.status_code >= 400:
+            failed.add(url)
+            stats.bump('failures')
+            continue
+        stats.bump('successes')
+        metadata_records, leak_records = extract_document_records(
+            response.url,
+            response.content,
+            normalize_content_type(response.headers.get('Content-Type', '')),
+        )
+        document_metadata.update(metadata_records)
+        document_leaks.update(leak_records)
+
+
+def discover_hidden_paths():
+    if mode != 'hidden':
+        return
+    guesses = build_hidden_candidates(main_url, internal, scripts, endpoints)
+    if not guesses:
+        return
+    print(f'{fang}Probing {len(guesses)} shadow path{"s" if len(guesses) != 1 else ""}…')
+    for guess in guesses:
+        normalized_guess = normalize_url(guess, base_url=main_url)
+        if not normalized_guess:
+            continue
+        if normalized_guess in processed or normalized_guess in internal or normalized_guess in external:
+            continue
+        if not is_in_scope(normalized_guess, host, domain, scope_mode, scope_allow, scope_deny):
+            continue
+        result = requester(
+            normalized_guess, main_url, delay, cook, headers, timeout,
+            host, proxies, user_agents, failed, processed, stats, policy=policy,
+        )
+        if not record_request_outcome(normalized_guess, result, 'page'):
+            continue
+        hidden_paths.add(normalized_guess)
+        response = maybe_render_page(normalized_guess, result)
+        run_page_extractors(normalized_guess, response, extractor_context)
+
+
+def load_previous_snapshot(snapshot_dir):
+    if not snapshot_dir or not os.path.isdir(snapshot_dir):
+        return {}
+    snapshot = {}
+    for name in list(dataset_names) + ['stats']:
+        path = os.path.join(snapshot_dir, f'{name}.txt')
+        if not os.path.exists(path):
+            continue
+        with open(path, 'r', encoding='utf-8') as handle:
+            lines = [line.rstrip('\n') for line in handle if line.strip()]
+        if name == 'stats':
+            stats_dict = {}
+            for line in lines:
+                key, _, value = line.partition('=')
+                if key:
+                    stats_dict[key] = value
+            snapshot[name] = stats_dict
+        else:
+            snapshot[name] = lines
+    return snapshot
+
+
+def snapshot_exists(snapshot_dir):
+    if not snapshot_dir or not os.path.isdir(snapshot_dir):
+        return False
+    return any(
+        os.path.exists(os.path.join(snapshot_dir, f'{name}.txt'))
+        for name in list(dataset_names) + ['stats']
+    )
+
+
 print(f'{fang}Target locked: {bold}{main_url}{end}')
 if resume_state:
     print(f'{fang}Rising from checkpoint: {bold}{args.resume}{end}')
-print(f'{fang}The hunt begins… depth={crawl_level}, threads={thread_count}, delay={delay}s, scope={scope_mode}')
+print(f'{fang}The hunt begins… depth={crawl_level}, threads={thread_count}, delay={delay}s, scope={scope_mode}, mode={mode}')
+if document_depth_forced:
+    print(f'{crypt}Document harvester raised crawl depth to 1 so it can reach linked document tombs.')
 print(f'{dark_red}{"─" * 60}{end}')
 then = time.time()
 
@@ -471,10 +648,12 @@ if not only_urls:
         else:
             external.add(normalized_script)
 
-    if scripts:
+    if scripts and mode != 'document':
         print(f'{fang}Draining {len(scripts)} JavaScript script{"s" if len(scripts) != 1 else ""}…')
         flash(jscanner, scripts, thread_count)
         write_checkpoint('scripts-scanned')
+    elif scripts and mode == 'document':
+        print(f'{crypt}Document harvester mode skips JavaScript analysis so it can focus on document extraction.')
 
     for url in internal:
         fuzzable_url = normalize_fuzzable_url(url)
@@ -500,13 +679,36 @@ if not only_urls:
         except Exception:
             pass
 
+    if mode == 'document':
+        harvest_documents()
+    if mode == 'hidden':
+        discover_hidden_paths()
+
 now = time.time()
 diff = now - then
 minutes, seconds, _ = timer(diff, processed)
 
 os.makedirs(output_dir, exist_ok=True)
-datasets = [files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys]
-dataset_names = ['files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped', 'redirects', 'internal', 'scripts', 'external', 'fuzzable', 'endpoints', 'keys']
+previous_snapshot = {}
+if mode == 'temporal':
+    baseline_dir = temporal_baseline
+    if baseline_dir and snapshot_exists(baseline_dir):
+        previous_snapshot = load_previous_snapshot(baseline_dir)
+    elif snapshot_exists(output_dir):
+        previous_snapshot = load_previous_snapshot(output_dir)
+datasets = [
+    files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
+    document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
+]
+if mode == 'temporal' and previous_snapshot:
+    current_snapshot = {
+        name: sorted(dataset)
+        for name, dataset in zip(dataset_names, datasets)
+    }
+    current_snapshot['stats'] = stats.snapshot(visited=len(processed))
+    temporal_diffs.update(build_temporal_diffs(previous_snapshot, current_snapshot))
+elif mode == 'temporal':
+    temporal_diffs.add('dataset=temporal_diffs change=baseline-missing value=No prior snapshot found')
 writer(datasets, dataset_names, output_dir)
 
 visited_count = len(processed)
@@ -544,6 +746,15 @@ datasets_dict = {
     'fuzzable': sorted(fuzzable),
     'endpoints': sorted(endpoints),
     'keys': sorted(keys),
+    'document_metadata': sorted(document_metadata),
+    'document_leaks': sorted(document_leaks),
+    'js_intel': sorted(js_intel),
+    'threads': sorted(threads),
+    'locations': sorted(locations),
+    'stories': sorted(stories),
+    'hidden_paths': sorted(hidden_paths),
+    'scam_signals': sorted(scam_signals),
+    'temporal_diffs': sorted(temporal_diffs),
     'stats': stats_summary,
 }
 

@@ -72,13 +72,30 @@ Windows:
 launch.bat -u https://example.com
 ```
 
+Double-click launcher:
+
+```text
+🦇 Double-Click to Start Vampiric Crawler.bat
+```
+
 Web UI:
 
 ```cmd
 launch-web.bat
 ```
 
-If you double-click the launcher instead of passing flags in a terminal, it will prompt for the target URL first.
+Double-click web UI launcher:
+
+```text
+🦇 Double-Click to Start Vampiric Web UI.bat
+```
+
+If you double-click the crawler launcher instead of passing flags in a terminal:
+
+- the window stays open
+- it tells you exactly what to do
+- it prompts for the target URL
+- it waits for a key press before closing
 
 ## Usage
 

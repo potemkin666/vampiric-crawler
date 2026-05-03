@@ -4,10 +4,68 @@ const state = {
   lastFeedKey: '',
 };
 
+const MODE_CONFIG = {
+  generic: {
+    label: 'GENERIC HUNT',
+    description: 'Balanced reconnaissance across pages, forms, scripts, and relics.',
+    flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns'],
+    force: {},
+  },
+  document: {
+    label: 'DOCUMENT HARVESTER',
+    description: 'Exhume PDF and office tombs for metadata, authors, internal paths, and mail leaks.',
+    flags: ['scope', 'intel', 'robots', 'archive'],
+    force: { render: false },
+  },
+  'js-intel': {
+    label: 'JS INTELLIGENCE',
+    description: 'Read occult JavaScript sigils for hidden routes, tokens, feature flags, and config relics.',
+    flags: ['scope', 'secrets', 'robots', 'render', 'archive'],
+    force: { secrets: true },
+  },
+  forum: {
+    label: 'THREAD NECROMANCY',
+    description: 'Reanimate conversations through replies, quotes, and deleted-user shadows.',
+    flags: ['scope', 'intel', 'robots', 'render'],
+    force: {},
+  },
+  geo: {
+    label: 'GEO-INTELLIGENCE',
+    description: 'Collect coordinates, place names, and geo tags into map-ready blood trails.',
+    flags: ['scope', 'intel', 'robots', 'render'],
+    force: {},
+  },
+  news: {
+    label: 'NEWS PROPAGATION',
+    description: 'Follow one story through outlets, tongues, regions, and mutations.',
+    flags: ['scope', 'robots', 'render', 'archive'],
+    force: {},
+  },
+  hidden: {
+    label: 'SHADOW GATE HUNT',
+    description: 'Blend learned paths with a bounded wordlist to find sealed routes and hidden doors.',
+    flags: ['scope', 'robots', 'archive'],
+    force: {},
+  },
+  scam: {
+    label: 'SCAM / DARK PATTERN',
+    description: 'Flag fake urgency, coercive funnels, cloned trust marks, and cursed checkout flows.',
+    flags: ['scope', 'intel', 'robots', 'render'],
+    force: {},
+  },
+  temporal: {
+    label: 'TEMPORAL CHANGE',
+    description: 'Compare the current harvest against an older night and mark what shifted in silence.',
+    flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns'],
+    force: {},
+  },
+};
+
 const els = {
   app: document.getElementById('app'),
   form: document.getElementById('crawlForm'),
   targetUrl: document.getElementById('targetUrl'),
+  crawlMode: document.getElementById('crawlMode'),
   depth: document.getElementById('depth'),
   threads: document.getElementById('threads'),
   delay: document.getElementById('delay'),
@@ -32,6 +90,7 @@ const els = {
   exportButtons: document.getElementById('exportButtons'),
   recordPath: document.getElementById('recordPath'),
   sealedRecords: document.getElementById('sealedRecords'),
+  modeHint: document.getElementById('modeHint'),
 };
 
 function escapeHtml(value) {
@@ -46,6 +105,7 @@ function escapeHtml(value) {
 function formPayload() {
   return {
     target_url: els.targetUrl.value.trim(),
+    mode: els.crawlMode.value,
     depth: Number(els.depth.value || 2),
     threads: Number(els.threads.value || 4),
     delay: Number(els.delay.value || 0),
@@ -63,11 +123,27 @@ function formPayload() {
 function renderCommandPreview() {
   const payload = formPayload();
   let preview = `> CRAWL ${payload.target_url || 'https://example.com'} --depth ${payload.depth}`;
+  if (payload.mode !== 'generic') preview += ` --mode ${payload.mode}`;
   if (payload.scope === 'domain') preview += ' --scope domain';
   if (payload.render_js) preview += ' --render-js';
   if (payload.archive_seeds) preview += ' --wayback';
   if (payload.enumerate_subdomains) preview += ' --dns';
   els.commandPreview.textContent = preview;
+}
+
+function syncModeControls() {
+  const config = MODE_CONFIG[els.crawlMode.value] || MODE_CONFIG.generic;
+  els.modeHint.textContent = `${config.label} // ${config.description}`;
+  document.querySelectorAll('[data-flag]').forEach((node) => {
+    node.classList.toggle('is-hidden', !config.flags.includes(node.dataset.flag));
+  });
+  if (Object.prototype.hasOwnProperty.call(config.force, 'secrets')) {
+    els.extractSecrets.checked = config.force.secrets;
+  }
+  if (Object.prototype.hasOwnProperty.call(config.force, 'render')) {
+    els.renderJs.checked = config.force.render;
+  }
+  renderCommandPreview();
 }
 
 function buildMeter(data) {
@@ -95,18 +171,11 @@ function buildMeter(data) {
 
 function renderSummary(data) {
   const summary = data.summary || {};
-  const chips = [
-    ['LINKS', summary.links_unearthed || 0],
-    ['RELICS', summary.relics_found || 0],
-    ['MAIL', summary.mail_sigils || 0],
-    ['DOCS', summary.document_tombs || 0],
-    ['SCRIPTS', summary.script_bones || 0],
-    ['OMENS', summary.failures || 0],
-  ];
-  els.summaryChips.innerHTML = chips.map(([label, value]) => `
+  const chips = summary.summary_cards || [];
+  els.summaryChips.innerHTML = chips.map((item) => `
     <div class="summary-chip">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value)}</strong>
+      <span>${escapeHtml(item.label)}</span>
+      <strong>${escapeHtml(item.value)}</strong>
     </div>
   `).join('');
 }
@@ -155,6 +224,12 @@ function renderState(data) {
   els.app.dataset.status = state.status;
   els.statusMessage.textContent = data.status_message || 'THE CRAWLER SLEEPS';
   els.asciiMeter.textContent = buildMeter(data);
+  if (data.mode) {
+    els.crawlMode.value = data.mode;
+  }
+  if (data.mode_label || data.mode_description) {
+    els.modeHint.textContent = `${data.mode_label || ''}${data.mode_description ? ` // ${data.mode_description}` : ''}`.trim();
+  }
   renderSummary(data);
   els.liveFeed.textContent = (data.feed && data.feed.length) ? data.feed.join('\n') : 'Awaiting target acquisition…';
   els.errorConsole.textContent = (data.errors && data.errors.length)
@@ -166,7 +241,8 @@ function renderState(data) {
   els.pauseButton.disabled = !data.can_pause;
   els.stopButton.disabled = !data.can_stop;
   els.beginButton.disabled = data.status === 'running' || data.status === 'paused' || data.status === 'stopping';
-  els.pauseButton.textContent = data.can_resume ? '> RESUME DESCENT' : '> PAUSE DESCENT';
+  els.pauseButton.textContent = data.can_resume ? '> REAWAKEN THE RITE' : '> SUSPEND THE RITE';
+  syncModeControls();
 }
 
 async function postJson(url, payload = {}) {
@@ -257,11 +333,12 @@ function attachDecryptHover() {
 ['input', 'change'].forEach((eventName) => {
   els.form.addEventListener(eventName, renderCommandPreview);
 });
+els.crawlMode.addEventListener('change', syncModeControls);
 
 els.beginButton.addEventListener('click', beginCrawl);
 els.pauseButton.addEventListener('click', togglePause);
 els.stopButton.addEventListener('click', stopCrawl);
 
-renderCommandPreview();
+syncModeControls();
 refreshState();
 state.timer = setInterval(refreshState, 1500);

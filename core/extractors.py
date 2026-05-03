@@ -4,6 +4,13 @@ import posixpath
 import re
 from urllib.parse import urlsplit
 
+from core.modes import (
+    extract_js_intel,
+    extract_location_records,
+    extract_scam_signals,
+    extract_story_records,
+    extract_thread_records,
+)
 from core.regex import rintels, rendpoint, rhref, rscript, rentropy, rsecrets
 from core.utils import (
     entropy,
@@ -205,6 +212,41 @@ def script_artifact_extractor(url, response, context):
     if 'graphql' in response.lower():
         for match in GRAPHQL_HINT_RE.findall(response):
             _record_discovered_reference(url, match, context, from_script=True)
+
+
+@register_script_extractor
+def js_intelligence_extractor(url, response, context):
+    if context.get('mode') not in ('generic', 'js-intel'):
+        return
+    context['js_intel'].update(extract_js_intel(url, response))
+
+
+@register_page_extractor
+def forum_thread_extractor(url, response, context):
+    if context.get('mode') != 'forum':
+        return
+    context['threads'].update(extract_thread_records(url, response))
+
+
+@register_page_extractor
+def geo_location_extractor(url, response, context):
+    if context.get('mode') != 'geo':
+        return
+    context['locations'].update(extract_location_records(url, response))
+
+
+@register_page_extractor
+def story_extractor(url, response, context):
+    if context.get('mode') != 'news':
+        return
+    context['stories'].update(extract_story_records(url, response))
+
+
+@register_page_extractor
+def scam_signal_extractor(url, response, context):
+    if context.get('mode') != 'scam':
+        return
+    context['scam_signals'].update(extract_scam_signals(url, response))
 
 
 def first_secret_group(match):
