@@ -72,7 +72,7 @@ def get_session():
             redirect=5,
             backoff_factor=0.4,
             status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=frozenset(('GET', 'HEAD')),
+            allowed_methods=frozenset(('GET',)),
             raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry, pool_connections=32, pool_maxsize=32)

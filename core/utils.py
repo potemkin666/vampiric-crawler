@@ -190,7 +190,7 @@ def extract_headers(raw):
             continue
         if ':' not in line:
             raise ValueError(
-                'Header line must use "Key: Value" format: {}'.format(line)
+                f'Header line must use "Key: Value" format: {line}'
             )
         key, _, value = line.partition(':')
         headers[key.strip()] = value.strip()
