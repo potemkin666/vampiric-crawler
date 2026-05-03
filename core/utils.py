@@ -191,11 +191,10 @@ def is_in_scope(url, host, domain, scope='host'):
 # Verbose output
 # ---------------------------------------------------------------------------
 
-def verb(label, value):
+def verb(message):
     """Print a verbose message if verbose mode is on."""
     if core.config.verbose:
-        display_value = '[redacted]' if label in ('Key', 'Header') else value
-        print(f'{crypt}{label}: {display_value}')
+        print(f'{crypt}{message}')
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +233,7 @@ def regxy(pattern, response, suppress, custom):
     try:
         matches = re.findall(pattern, response)
         for match in matches:
-            verb('Custom', match)
+            verb(f'Custom: {match}')
             custom.add(match)
     except re.error as exc:
         print(f'Invalid regex pattern: {exc}', file=sys.stderr)

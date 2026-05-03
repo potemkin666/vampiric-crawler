@@ -331,7 +331,7 @@ def intel_extractor(url, response):
     res = extract_visible_text(response)
     for name, pattern in rintels:
         for match in pattern.findall(res):
-            verb('Intel', match)
+            verb(f'Intel: {match}')
             bad_intel.add((match, name, url))
 
 
@@ -341,7 +341,7 @@ def js_extractor(page_url, response):
         src = normalize_url(match[2].replace("'", '').replace('"', ''), base_url=page_url)
         if not src:
             continue
-        verb('JS file', src)
+        verb(f'JS file: {src}')
         bad_scripts.add(src)
 
 
@@ -389,12 +389,12 @@ def secret_extractor(url, response):
         for match in pattern.findall(response):
             token = first_secret_group(match)
             if token and (secret_name, token) not in seen:
-                verb('Key', secret_name)
+                verb('Key: [redacted]')
                 keys.add(f'{url}:{secret_name}:{token}')
                 seen.add((secret_name, token))
     for match in rentropy.findall(response):
         if entropy(match) >= 4:
-            verb('Key', 'HIGH_ENTROPY')
+            verb('Key: [redacted]')
             keys.add(f'{url}:HIGH_ENTROPY:{match}')
 
 
@@ -418,9 +418,9 @@ def extractor(url):
         if not scoped_link:
             continue
         if is_in_scope(scoped_link, host, domain, scope_mode):
-            verb('Internal page', scoped_link)
+            verb(f'Internal page: {scoped_link}')
         else:
-            verb('External page', scoped_link)
+            verb(f'External page: {scoped_link}')
 
     if not only_urls:
         intel_extractor(url, response)
@@ -446,7 +446,7 @@ def jscanner(url):
     for match in rendpoint.findall(response):
         path = match if isinstance(match, str) else (match[0] or match[1])
         if path and not re.search(r'[}{><"\']', path) and path != '/':
-            verb('JS endpoint', path)
+            verb(f'JS endpoint: {path}')
             endpoints.add(path)
 
 
@@ -592,7 +592,7 @@ if args.dns:
             try:
                 socket.gethostbyname(candidate)
                 subdomains.add(candidate)
-                verb('Subdomain', candidate)
+                verb(f'Subdomain: {candidate}')
             except socket.gaierror:
                 pass
         if subdomains:
