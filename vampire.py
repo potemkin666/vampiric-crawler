@@ -114,8 +114,9 @@ def _configure_console_stream(stream):
         )
 
 
-sys.stdout = _configure_console_stream(sys.stdout)
-sys.stderr = _configure_console_stream(sys.stderr)
+if __name__ == '__main__':
+    sys.stdout = _configure_console_stream(sys.stdout)
+    sys.stderr = _configure_console_stream(sys.stderr)
 
 BANNER = f"""
 {dark_red}🦇 Vampiric Crawler{end}  {crypt}v1.1.0{end}

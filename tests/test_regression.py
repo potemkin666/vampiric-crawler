@@ -1009,7 +1009,7 @@ class RegressionTests(unittest.TestCase):
             cwd=REPO_ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, 'PYTHONIOENCODING': 'cp1252'},
+            env=dict(os.environ, PYTHONIOENCODING='cp1252'),
             check=False,
         )
         stdout = process.stdout.decode('cp1252', errors='replace')
