@@ -1009,15 +1009,16 @@ class RegressionTests(unittest.TestCase):
             cwd=REPO_ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             env={**os.environ, 'PYTHONIOENCODING': 'cp1252'},
             check=False,
         )
+        stdout = process.stdout.decode('cp1252', errors='replace')
+        stderr = process.stderr.decode('cp1252', errors='replace')
         self.assertEqual(process.returncode, 1)
-        self.assertIn('Vampiric Crawler', process.stdout)
-        self.assertIn('No prey specified', process.stdout)
-        self.assertNotIn('UnicodeEncodeError', process.stdout)
-        self.assertNotIn('UnicodeEncodeError', process.stderr)
+        self.assertIn('Vampiric Crawler', stdout)
+        self.assertIn('No prey specified', stdout)
+        self.assertNotIn('UnicodeEncodeError', stdout)
+        self.assertNotIn('UnicodeEncodeError', stderr)
 
     def test_web_ui_state_and_export_routes_surface_sealed_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
