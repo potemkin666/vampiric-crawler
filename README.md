@@ -57,6 +57,8 @@ Windows:
 launch.bat -u https://example.com
 ```
 
+If you double-click the launcher instead of passing flags in a terminal, it will prompt for the target URL first.
+
 ## Usage
 
 ```bash

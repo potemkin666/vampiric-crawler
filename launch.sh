@@ -23,6 +23,22 @@ if [ -f "$REQ" ]; then
     $PYTHON -m pip install -q -r "$REQ" 2>/dev/null || true
 fi
 
+# ── Prompt for a target when launched without CLI args ───────
+if [ "$#" -eq 0 ]; then
+    if [ -t 0 ] || [ -n "${VAMPIRIC_LAUNCH_PROMPT:-}" ]; then
+        printf "Enter target URL (for example https://example.com): "
+        IFS= read -r TARGET_URL
+        if [ -z "$TARGET_URL" ]; then
+            echo "[☠] No prey specified. Closing the coffin."
+            exit 1
+        fi
+        set -- -u "$TARGET_URL"
+    else
+        echo "[☠] No target provided. Re-run with -u <URL>."
+        exit 1
+    fi
+fi
+
 # ── Run ─────────────────────────────────────────────────────
 cd "$SCRIPT_DIR"
 $PYTHON vampire.py "$@"

@@ -203,6 +203,54 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('https://example.com/root', internal)
         self.assertIn('https://cdn.example.com/file', internal)
 
+    def test_launch_script_prompts_for_url_when_started_without_args(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            launcher_path = os.path.join(tmpdir, 'launch.sh')
+            with open(os.path.join(REPO_ROOT, 'launch.sh'), 'r', encoding='utf-8') as src:
+                launcher = src.read()
+            with open(launcher_path, 'w', encoding='utf-8') as handle:
+                handle.write(launcher)
+            os.chmod(launcher_path, 0o755)
+
+            with open(os.path.join(tmpdir, 'vampire.py'), 'w', encoding='utf-8') as handle:
+                handle.write('print("stub vampire")\n')
+
+            bin_dir = os.path.join(tmpdir, 'bin')
+            os.makedirs(bin_dir)
+            python_stub = os.path.join(bin_dir, 'python3')
+            with open(python_stub, 'w', encoding='utf-8') as handle:
+                handle.write(
+                    '#!/usr/bin/env bash\n'
+                    'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+                    '  exit 0\n'
+                    'fi\n'
+                    'printf "%s\\n" "$@" > "$TEST_LOG"\n'
+                )
+            os.chmod(python_stub, 0o755)
+
+            env = os.environ.copy()
+            env['PATH'] = bin_dir + os.pathsep + env.get('PATH', '')
+            env['TEST_LOG'] = os.path.join(tmpdir, 'launch-args.txt')
+            env['VAMPIRIC_LAUNCH_PROMPT'] = '1'
+
+            result = subprocess.run(
+                [launcher_path],
+                cwd=tmpdir,
+                input='https://example.com\n',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn('Enter target URL', result.stdout)
+
+            with open(env['TEST_LOG'], 'r', encoding='utf-8') as handle:
+                recorded_args = handle.read().splitlines()
+            self.assertEqual(recorded_args, ['vampire.py', '-u', 'https://example.com'])
+
     def test_cli_regression_for_headers_stats_redirects_forms_and_exports(self):
         FixtureHandler.header_failures = []
         FixtureHandler.flaky_hits = 0
