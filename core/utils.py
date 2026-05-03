@@ -113,7 +113,7 @@ def normalize_query_string(query):
     if not query:
         return ''
     pairs = parse_qsl(query, keep_blank_values=True)
-    pairs.sort()
+    pairs.sort(key=lambda item: item[0])
     return urlencode(pairs, doseq=True)
 
 

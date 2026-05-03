@@ -255,19 +255,22 @@ class VisibleTextExtractor(HTMLParser):
 
     def __init__(self):
         super().__init__()
-        self._skip_depth = 0
+        self._skip_tags = []
         self.parts = []
 
     def handle_starttag(self, tag, attrs):
         if tag in ('script', 'style'):
-            self._skip_depth += 1
+            self._skip_tags.append(tag)
 
     def handle_endtag(self, tag):
-        if tag in ('script', 'style') and self._skip_depth:
-            self._skip_depth -= 1
+        if tag in ('script', 'style') and self._skip_tags:
+            for index in range(len(self._skip_tags) - 1, -1, -1):
+                if self._skip_tags[index] == tag:
+                    del self._skip_tags[index]
+                    break
 
     def handle_data(self, data):
-        if not self._skip_depth and data.strip():
+        if not self._skip_tags and data.strip():
             self.parts.append(data)
 
 
@@ -370,7 +373,7 @@ def form_extractor(page_url, response):
 
 
 def first_secret_group(match):
-    """Return the first non-empty regex group from *match*."""
+    """Return the first non-empty captured group from a regex match result."""
     if isinstance(match, str):
         return match.strip()
     for item in match:
@@ -386,12 +389,12 @@ def secret_extractor(url, response):
         for match in pattern.findall(response):
             token = first_secret_group(match)
             if token and (secret_name, token) not in seen:
-                verb('Key', f'{secret_name}: {token}')
+                verb('Key', secret_name)
                 keys.add(f'{url}:{secret_name}:{token}')
                 seen.add((secret_name, token))
     for match in rentropy.findall(response):
         if entropy(match) >= 4:
-            verb('Key', f'HIGH_ENTROPY: {match}')
+            verb('Key', 'HIGH_ENTROPY')
             keys.add(f'{url}:HIGH_ENTROPY:{match}')
 
 
