@@ -13,7 +13,7 @@ if command -v python3 &>/dev/null; then
 elif command -v python &>/dev/null; then
     PYTHON=python
 else
-    echo "[☠] Python not found. Please install Python 3.6+ to awaken the vampire."
+    echo "[☠] Python not found. Please install Python 3.6+ to awaken the vampire." >&2
     exit 1
 fi
 
@@ -29,12 +29,12 @@ if [ "$#" -eq 0 ]; then
         printf "Enter target URL (for example https://example.com): "
         IFS= read -r TARGET_URL
         if [ -z "$TARGET_URL" ]; then
-            echo "[☠] No prey specified. Closing the coffin."
+            echo "[☠] No prey specified. Closing the coffin." >&2
             exit 1
         fi
         set -- -u "$TARGET_URL"
     else
-        echo "[☠] No target provided. Re-run with -u <URL>."
+        echo "[☠] No target provided. Re-run with -u <URL>." >&2
         exit 1
     fi
 fi

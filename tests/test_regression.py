@@ -284,7 +284,7 @@ class RegressionTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1, msg=result.stderr)
             self.assertIn('Enter target URL', result.stdout)
-            self.assertIn('No prey specified. Closing the coffin.', result.stdout)
+            self.assertIn('No prey specified. Closing the coffin.', result.stderr)
 
     def test_cli_regression_for_headers_stats_redirects_forms_and_exports(self):
         FixtureHandler.header_failures = []
