@@ -66,6 +66,7 @@ DATASET_FILES = (
     *ANALYSIS_DATASET_NAMES,
 )
 TEXT_LIMIT = 250
+WEBUI_EVENT_PREFIX = '@@WEBUI@@'
 STATUS_MESSAGES = {
     'idle': 'THE CRAWLER SLEEPS',
     'ready': 'TARGET ACQUIRED',
@@ -77,6 +78,21 @@ STATUS_MESSAGES = {
     'empty': 'THE ARCHIVE IS SILENT',
     'stopping': 'HALT RITE',
 }
+
+
+def default_queue_snapshot() -> dict[str, dict[str, Any]]:
+    return {
+        name: {'count': 0, 'items': []}
+        for name in ('pending', 'active', 'completed', 'skipped')
+    }
+
+
+def default_robots_metadata() -> dict[str, Any]:
+    return {'rules': [], 'crawl_delay': None}
+
+
+def default_sitemap_metadata() -> dict[str, Any]:
+    return {'sitemap_urls': [], 'queued_urls': []}
 
 
 def now_iso() -> str:
@@ -294,10 +310,17 @@ class CrawlRun:
     errors: deque[str] = field(default_factory=lambda: deque(maxlen=150))
     lock: threading.Lock = field(default_factory=threading.Lock)
     exports_ready: bool = False
+    result_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    queue_snapshot: dict[str, dict[str, Any]] = field(default_factory=default_queue_snapshot)
+    robots_metadata: dict[str, Any] = field(default_factory=default_robots_metadata)
+    sitemap_metadata: dict[str, Any] = field(default_factory=default_sitemap_metadata)
 
     def ingest_log(self, raw_line: str) -> None:
         line = strip_ansi(raw_line)
         if not line:
+            return
+        if line.startswith(WEBUI_EVENT_PREFIX):
+            self.ingest_event(line[len(WEBUI_EVENT_PREFIX):])
             return
         with self.lock:
             self.logs.append(line)
@@ -321,8 +344,62 @@ class CrawlRun:
             ):
                 self.errors.append(line)
 
+    def ingest_event(self, payload: str) -> None:
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+        event_type = event.get('type')
+        data = event.get('payload') or {}
+        with self.lock:
+            if event_type == 'result' and isinstance(data, dict) and data.get('url'):
+                self.result_records[str(data['url'])] = {
+                    'url': str(data.get('url') or ''),
+                    'status_code': data.get('status_code'),
+                    'content_type': str(data.get('content_type') or ''),
+                    'depth': data.get('depth'),
+                    'source_page': str(data.get('source_page') or ''),
+                    'discovery_time': int(data.get('discovery_time') or 0),
+                    'state': str(data.get('state') or 'pending'),
+                    'error_kind': str(data.get('error_kind') or ''),
+                    'error_message': str(data.get('error_message') or ''),
+                    'source_kind': str(data.get('source_kind') or ''),
+                }
+            elif event_type == 'queue' and isinstance(data, dict):
+                self.queue_snapshot = {
+                    name: {
+                        'count': int((details or {}).get('count') or 0),
+                        'items': [str(item) for item in ((details or {}).get('items') or [])],
+                    }
+                    for name, details in data.items()
+                }
+            elif event_type == 'robots' and isinstance(data, dict):
+                self.robots_metadata = {
+                    'rules': list(data.get('rules') or []),
+                    'crawl_delay': data.get('crawl_delay'),
+                }
+            elif event_type == 'sitemap' and isinstance(data, dict):
+                self.sitemap_metadata = {
+                    'sitemap_urls': [str(item) for item in (data.get('sitemap_urls') or [])],
+                    'queued_urls': [str(item) for item in (data.get('queued_urls') or [])],
+                }
+            elif event_type == 'error' and isinstance(data, dict):
+                message = data.get('message') or 'The rite failed.'
+                category = data.get('category')
+                url = data.get('url')
+                status_code = data.get('status_code')
+                parts = [str(message)]
+                if category:
+                    parts.append(f'category={category}')
+                if status_code:
+                    parts.append(f'status={status_code}')
+                if url:
+                    parts.append(f'url={url}')
+                self.errors.append(' | '.join(parts))
+
     def snapshot(self, history: list[dict[str, Any]]) -> dict[str, Any]:
         datasets, stats = collect_run_artifacts(self.output_dir, self.checkpoint_path)
+        checkpoint_meta = load_checkpoint_metadata(self.checkpoint_path)
         visible_status = self.status
         if visible_status == 'ready' and self.process:
             visible_status = 'running'
@@ -332,6 +409,10 @@ class CrawlRun:
             logs = list(self.logs)
             feed = list(self.feed)
             errors = list(self.errors)
+            result_records = dict(self.result_records)
+            queue_snapshot = dict(self.queue_snapshot)
+            robots_metadata = dict(self.robots_metadata)
+            sitemap_metadata = dict(self.sitemap_metadata)
         return {
             'id': self.run_id,
             'status': visible_status,
@@ -357,6 +438,10 @@ class CrawlRun:
             'logs': logs,
             'feed': feed,
             'errors': errors,
+            'queue': queue_snapshot if any(details.get('count') for details in queue_snapshot.values()) else checkpoint_meta['queue'],
+            'robots_details': robots_metadata if robots_metadata.get('rules') or robots_metadata.get('crawl_delay') is not None else checkpoint_meta['robots'],
+            'sitemap_details': sitemap_metadata if sitemap_metadata.get('sitemap_urls') or sitemap_metadata.get('queued_urls') else checkpoint_meta['sitemap'],
+            'result_rows': build_result_rows(result_records or checkpoint_meta['results']),
             'summary': build_summary(self.payload, datasets, stats),
             'panels': build_panels(self.payload, datasets, stats),
             'exports': build_exports(self.output_dir),
@@ -391,6 +476,67 @@ def collect_run_artifacts(output_dir: Path, checkpoint_path: Path) -> tuple[dict
     if isinstance(checkpoint.get('stats'), dict):
         stats = checkpoint['stats']
     return datasets, stats
+
+
+def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
+    metadata = {
+        'queue': default_queue_snapshot(),
+        'results': {},
+        'robots': default_robots_metadata(),
+        'sitemap': default_sitemap_metadata(),
+    }
+    if not checkpoint_path.exists():
+        return metadata
+    try:
+        with checkpoint_path.open('r', encoding='utf-8') as handle:
+            checkpoint = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return metadata
+
+    queue_state = checkpoint.get('queue_state') or {}
+    if isinstance(queue_state, dict):
+        metadata['queue'] = {
+            name: {
+                'count': len(values or []),
+                'items': [str(item) for item in (values or [])[:12]],
+            }
+            for name, values in queue_state.items()
+        }
+    crawl_records = checkpoint.get('crawl_records') or {}
+    if isinstance(crawl_records, dict):
+        metadata['results'] = crawl_records
+    robots_metadata = checkpoint.get('robots_metadata') or {}
+    if isinstance(robots_metadata, dict):
+        metadata['robots'] = {
+            'rules': list(robots_metadata.get('rules') or []),
+            'crawl_delay': robots_metadata.get('crawl_delay'),
+        }
+    sitemap_metadata = checkpoint.get('sitemap_metadata') or {}
+    if isinstance(sitemap_metadata, dict):
+        metadata['sitemap'] = {
+            'sitemap_urls': [str(item) for item in (sitemap_metadata.get('sitemap_urls') or [])],
+            'queued_urls': [str(item) for item in (sitemap_metadata.get('queued_urls') or [])],
+        }
+    return metadata
+
+
+def build_result_rows(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for url, raw in sorted(records.items(), key=lambda item: int((item[1] or {}).get('discovery_time') or 0)):
+        raw = raw or {}
+        rows.append({
+            'url': str(raw.get('url') or url),
+            'status_code': raw.get('status_code'),
+            'content_type': str(raw.get('content_type') or ''),
+            'depth': raw.get('depth'),
+            'source_page': str(raw.get('source_page') or ''),
+            'discovery_time': int(raw.get('discovery_time') or 0),
+            'state': str(raw.get('state') or 'pending'),
+            'error_kind': str(raw.get('error_kind') or ''),
+            'error_message': str(raw.get('error_message') or ''),
+            'source_kind': str(raw.get('source_kind') or ''),
+        })
+    return rows
 
 
 def build_summary(payload: dict[str, Any], datasets: dict[str, list[str]], stats: dict[str, Any]) -> dict[str, Any]:
@@ -605,7 +751,7 @@ class CrawlManager:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env={**os.environ, 'PYTHONUNBUFFERED': '1'},
+                env={**os.environ, 'PYTHONUNBUFFERED': '1', 'VAMPIRIC_WEBUI_EVENTS': '1'},
             )
             run = CrawlRun(
                 run_id=run_id,
@@ -718,6 +864,10 @@ class CrawlManager:
                 'logs': [],
                 'feed': [],
                 'errors': [],
+                'queue': default_queue_snapshot(),
+                'robots_details': default_robots_metadata(),
+                'sitemap_details': default_sitemap_metadata(),
+                'result_rows': [],
                 'summary': build_summary({}, {}, {}),
                 'panels': build_panels({}, {}, {}),
                 'exports': [],

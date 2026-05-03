@@ -412,6 +412,18 @@ artifact_genealogy = {}
 content_types = {}
 render_state = {'disabled': False, 'message': None}
 render_lock = threading.Lock()
+runtime_state_lock = threading.Lock()
+queue_state = {
+    'pending': set(),
+    'active': set(),
+    'completed': set(),
+    'skipped': set(),
+}
+crawl_records = {}
+discovery_counter = {'value': 0}
+robots_metadata = {'rules': [], 'crawl_delay': None}
+sitemap_metadata = {'sitemap_urls': [], 'queued_urls': []}
+webui_events_enabled = os.environ.get('VAMPIRIC_WEBUI_EVENTS') == '1'
 
 if resume_state:
     restored = normalize_checkpoint_sets(resume_state)
@@ -446,12 +458,165 @@ if resume_state:
     artifact_genealogy.update(normalize_checkpoint_mapping(resume_state, 'artifact_genealogy'))
     content_types.update(normalize_checkpoint_mapping(resume_state, 'content_types'))
     stats = CrawlStats.from_snapshot(resume_state.get('stats'))
+    restored_queue_state = normalize_checkpoint_mapping(resume_state, 'queue_state')
+    for state_name in queue_state:
+        queue_state[state_name].update(str(item) for item in restored_queue_state.get(state_name, []) if item)
+    restored_crawl_records = normalize_checkpoint_mapping(resume_state, 'crawl_records')
+    for record_url, record in restored_crawl_records.items():
+        if not isinstance(record, dict):
+            continue
+        crawl_records[str(record_url)] = {
+            'url': str(record.get('url') or record_url),
+            'status_code': record.get('status_code'),
+            'content_type': str(record.get('content_type') or ''),
+            'depth': record.get('depth'),
+            'source_page': str(record.get('source_page') or ''),
+            'discovery_time': int(record.get('discovery_time') or 0),
+            'state': str(record.get('state') or 'pending'),
+            'error_kind': str(record.get('error_kind') or ''),
+            'error_message': str(record.get('error_message') or ''),
+            'source_kind': str(record.get('source_kind') or ''),
+        }
+        discovery_counter['value'] = max(discovery_counter['value'], crawl_records[str(record_url)]['discovery_time'])
+    restored_robots_metadata = normalize_checkpoint_mapping(resume_state, 'robots_metadata')
+    if restored_robots_metadata:
+        robots_metadata.update({
+            'rules': list(restored_robots_metadata.get('rules') or []),
+            'crawl_delay': restored_robots_metadata.get('crawl_delay'),
+        })
+    restored_sitemap_metadata = normalize_checkpoint_mapping(resume_state, 'sitemap_metadata')
+    if restored_sitemap_metadata:
+        sitemap_metadata.update({
+            'sitemap_urls': list(restored_sitemap_metadata.get('sitemap_urls') or []),
+            'queued_urls': list(restored_sitemap_metadata.get('queued_urls') or []),
+        })
 
 policy = PolitenessController(
     base_delay=delay,
     host_concurrency=args.host_concurrency,
     adaptive_backoff=not args.disable_adaptive_backoff,
 )
+
+
+def emit_webui_event(event_type, payload):
+    if not webui_events_enabled:
+        return
+    print(f'@@WEBUI@@{json.dumps({"type": event_type, "payload": payload}, sort_keys=True, ensure_ascii=False)}', flush=True)
+
+
+def _queue_snapshot_locked(limit=12):
+    return {
+        name: {
+            'count': len(values),
+            'items': sorted(values)[:limit],
+        }
+        for name, values in queue_state.items()
+    }
+
+
+def finalize_crawl_records():
+    records = {}
+    for url, record in crawl_records.items():
+        records[url] = {
+            'url': url,
+            'status_code': record.get('status_code'),
+            'content_type': record.get('content_type') or '',
+            'depth': record.get('depth'),
+            'source_page': record.get('source_page') or '',
+            'discovery_time': int(record.get('discovery_time') or 0),
+            'state': record.get('state') or 'pending',
+            'error_kind': record.get('error_kind') or '',
+            'error_message': record.get('error_message') or '',
+            'source_kind': record.get('source_kind') or '',
+        }
+    return records
+
+
+def emit_queue_snapshot():
+    with runtime_state_lock:
+        snapshot = _queue_snapshot_locked()
+    emit_webui_event('queue', snapshot)
+
+
+def upsert_crawl_record(url, source_page=None, source_kind=None, depth=None, state=None,
+                        status_code=None, content_type=None, error_kind=None, error_message=None):
+    if not url:
+        return {}
+    with runtime_state_lock:
+        record = crawl_records.setdefault(url, {
+            'url': url,
+            'status_code': None,
+            'content_type': '',
+            'depth': None,
+            'source_page': '',
+            'discovery_time': 0,
+            'state': 'pending',
+            'error_kind': '',
+            'error_message': '',
+            'source_kind': '',
+        })
+        if not record['discovery_time']:
+            discovery_counter['value'] += 1
+            record['discovery_time'] = discovery_counter['value']
+        if source_page and not record.get('source_page'):
+            record['source_page'] = source_page
+        if source_kind and not record.get('source_kind'):
+            record['source_kind'] = source_kind
+        if depth is not None:
+            record['depth'] = depth
+        if state:
+            record['state'] = state
+        if status_code is not None:
+            record['status_code'] = status_code
+        if content_type is not None:
+            record['content_type'] = content_type or ''
+        if error_kind is not None:
+            record['error_kind'] = error_kind or ''
+        if error_message is not None:
+            record['error_message'] = error_message or ''
+        snapshot = dict(record)
+    emit_webui_event('result', snapshot)
+    return snapshot
+
+
+def note_pending_url(url, source_page=None, source_kind='link'):
+    if not url:
+        return
+    upsert_crawl_record(url, source_page=source_page, source_kind=source_kind, state='pending')
+    with runtime_state_lock:
+        if url not in queue_state['active'] and url not in queue_state['completed'] and url not in queue_state['skipped']:
+            queue_state['pending'].add(url)
+    emit_queue_snapshot()
+
+
+def mark_active_url(url):
+    if not url:
+        return
+    with runtime_state_lock:
+        queue_state['pending'].discard(url)
+        queue_state['active'].add(url)
+    upsert_crawl_record(url, state='active')
+    emit_queue_snapshot()
+
+
+def finalize_url_state(url, terminal_state, *, status_code=None, content_type=None,
+                       error_kind=None, error_message=None):
+    if not url:
+        return
+    queue_terminal_state = 'skipped' if terminal_state == 'skipped' else 'completed'
+    with runtime_state_lock:
+        queue_state['pending'].discard(url)
+        queue_state['active'].discard(url)
+        queue_state[queue_terminal_state].add(url)
+    upsert_crawl_record(
+        url,
+        state=terminal_state,
+        status_code=status_code,
+        content_type=content_type,
+        error_kind=error_kind,
+        error_message=error_message,
+    )
+    emit_queue_snapshot()
 
 
 def note_content_type(raw_content_type):
@@ -464,12 +629,13 @@ def record_artifact(url, discovered_on=None, source_kind='link', note=None):
     record_artifact_discovery(artifact_genealogy, url, discovered_on, source_kind, note)
 
 
-def mark_scope(url):
+def mark_scope(url, discovered_on=None, source_kind='link'):
     normalized = normalize_url(url, base_url=main_url)
     if not normalized:
         return ''
     if is_in_scope(normalized, host, domain, scope_mode, scope_allow, scope_deny):
         internal.add(normalized)
+        note_pending_url(normalized, discovered_on, source_kind)
     else:
         external.add(normalized)
     return normalized
@@ -527,6 +693,19 @@ def checkpoint_payload(stage):
         'output_dir': output_dir,
         'stats': stats.snapshot(visited=len(processed)),
         'content_types': content_types,
+        'queue_state': {
+            name: sorted(values)
+            for name, values in queue_state.items()
+        },
+        'crawl_records': finalize_crawl_records(),
+        'robots_metadata': {
+            'rules': list(robots_metadata.get('rules') or []),
+            'crawl_delay': robots_metadata.get('crawl_delay'),
+        },
+        'sitemap_metadata': {
+            'sitemap_urls': list(sitemap_metadata.get('sitemap_urls') or []),
+            'queued_urls': list(sitemap_metadata.get('queued_urls') or []),
+        },
         'files': sorted(files),
         'forms': sorted(forms),
         'intel': sorted(intel),
@@ -572,6 +751,13 @@ def write_checkpoint(stage):
 
 def record_request_outcome(url, result, purpose):
     note_content_type(result.content_type)
+    upsert_crawl_record(
+        url,
+        status_code=result.status_code,
+        content_type=result.content_type,
+        error_kind=result.error_kind,
+        error_message=result.error_message,
+    )
     if result.redirected:
         trail = ' -> '.join(
             normalize_url(hop, base_url=main_url) or hop
@@ -586,12 +772,27 @@ def record_request_outcome(url, result, purpose):
             )
     normalized_final = normalize_url(result.final_url, base_url=main_url)
     if normalized_final and normalized_final != url:
-        mark_scope(normalized_final)
+        mark_scope(normalized_final, url, 'redirect-target')
         if url in artifact_genealogy:
             record_artifact(normalized_final, url, 'redirect-target', 'redirect resolution')
 
     if result.skip_reason:
         skipped.add(f'{purpose}:{url}:{result.skip_reason}')
+        finalize_url_state(
+            url,
+            'skipped',
+            status_code=result.status_code,
+            content_type=result.content_type,
+            error_kind=result.error_kind or result.skip_reason,
+            error_message=result.error_message or result.skip_reason.replace('-', ' '),
+        )
+        if result.error_kind:
+            emit_webui_event('error', {
+                'url': url,
+                'category': result.error_kind,
+                'message': result.error_message or result.skip_reason.replace('-', ' '),
+                'status_code': result.status_code,
+            })
         return False
 
     if result.ok:
@@ -601,6 +802,20 @@ def record_request_outcome(url, result, purpose):
             else:
                 stats.bump('skipped')
                 skipped.add(f'{purpose}:{url}:content-type:{result.content_type or "unknown"}')
+                finalize_url_state(
+                    url,
+                    'skipped',
+                    status_code=result.status_code,
+                    content_type=result.content_type,
+                    error_kind='unsupported-content-type',
+                    error_message=f'Unsupported content type: {result.content_type or "unknown"}.',
+                )
+                emit_webui_event('error', {
+                    'url': url,
+                    'category': 'unsupported-content-type',
+                    'message': f'Unsupported content type: {result.content_type or "unknown"}.',
+                    'status_code': result.status_code,
+                })
                 return False
         elif purpose == 'script':
             if should_extract_script(result.content_type):
@@ -608,7 +823,42 @@ def record_request_outcome(url, result, purpose):
             else:
                 stats.bump('skipped')
                 skipped.add(f'{purpose}:{url}:content-type:{result.content_type or "unknown"}')
+                finalize_url_state(
+                    url,
+                    'skipped',
+                    status_code=result.status_code,
+                    content_type=result.content_type,
+                    error_kind='unsupported-content-type',
+                    error_message=f'Unsupported content type: {result.content_type or "unknown"}.',
+                )
+                emit_webui_event('error', {
+                    'url': url,
+                    'category': 'unsupported-content-type',
+                    'message': f'Unsupported content type: {result.content_type or "unknown"}.',
+                    'status_code': result.status_code,
+                })
                 return False
+        finalize_url_state(
+            url,
+            'completed',
+            status_code=result.status_code,
+            content_type=result.content_type,
+        )
+    else:
+        finalize_url_state(
+            url,
+            'failed',
+            status_code=result.status_code,
+            content_type=result.content_type,
+            error_kind=result.error_kind or result.error,
+            error_message=result.error_message or result.error or 'Request failed.',
+        )
+        emit_webui_event('error', {
+            'url': url,
+            'category': result.error_kind or result.error or 'request-error',
+            'message': result.error_message or result.error or 'Request failed.',
+            'status_code': result.status_code,
+        })
 
     return result.ok
 
@@ -635,11 +885,12 @@ def maybe_render_page(url, result):
                 print(f'{coffin}JS rendering disabled: {exc}')
         return result.text
     for discovered_url in rendered.urls:
-        mark_scope(discovered_url)
+        mark_scope(discovered_url, url, 'rendered-link')
     return rendered.html or result.text
 
 
 def extractor(url):
+    mark_active_url(url)
     result = requester(
         url, main_url, delay, cook, headers, timeout,
         host, proxies, user_agents, failed, processed, stats, policy=policy,
@@ -655,6 +906,7 @@ def extractor(url):
 
 
 def jscanner(url):
+    mark_active_url(url)
     result = requester(
         url, main_url, delay, cook, headers, timeout,
         host, proxies, user_agents, failed, processed, stats, policy=policy,
@@ -701,12 +953,20 @@ def harvest_documents():
         return
     print(f'{fang}Harvesting {len(document_urls)} document tomb{"s" if len(document_urls) != 1 else ""}…')
     for url in document_urls:
+        mark_active_url(url)
         stats.bump('requests')
         try:
             response = fetch_binary_document(url)
         except Exception as exc:
             failed.add(url)
             stats.bump('failures')
+            finalize_url_state(url, 'failed', error_kind='request-error', error_message=str(exc))
+            emit_webui_event('error', {
+                'url': url,
+                'category': 'request-error',
+                'message': str(exc),
+                'status_code': None,
+            })
             if verbose:
                 print(f'{coffin}Could not exhume document {url}: {exc}')
             continue
@@ -715,9 +975,23 @@ def harvest_documents():
         if response.status_code >= 400:
             failed.add(url)
             stats.bump('failures')
+            finalize_url_state(
+                url,
+                'failed',
+                status_code=response.status_code,
+                content_type=normalize_content_type(response.headers.get('Content-Type', '')),
+                error_kind='blocked' if response.status_code in (401, 403, 429) else 'client-error',
+                error_message='Request blocked by the target.' if response.status_code in (401, 403, 429) else f'Request failed with status {response.status_code}.',
+            )
             continue
         stats.bump('successes')
         note_content_type(response.headers.get('Content-Type', ''))
+        finalize_url_state(
+            url,
+            'completed',
+            status_code=response.status_code,
+            content_type=normalize_content_type(response.headers.get('Content-Type', '')),
+        )
         metadata_records, leak_records = extract_document_records(
             response.url,
             response.content,
@@ -753,6 +1027,8 @@ def discover_hidden_paths():
             continue
         if not is_in_scope(normalized_guess, host, domain, scope_mode, scope_allow, scope_deny):
             continue
+        note_pending_url(normalized_guess, main_url, 'hidden-probe')
+        mark_active_url(normalized_guess)
         result = requester(
             normalized_guess, main_url, delay, cook, headers, timeout,
             host, proxies, user_agents, failed, processed, stats, policy=policy,
@@ -802,6 +1078,9 @@ def process_inline_specimen():
     pseudo_url = main_url or 'https://inline.specimen.local/'
     internal.add(pseudo_url)
     processed.add(pseudo_url)
+    upsert_crawl_record(pseudo_url, source_page='inline-specimen', source_kind='inline-html', depth=0, state='completed', content_type='text/html')
+    with runtime_state_lock:
+        queue_state['completed'].add(pseudo_url)
     stats.bump('markup_pages')
     note_content_type('text/html')
     run_page_extractors(pseudo_url, inline_payload, only_urls_context if only_urls else extractor_context)
@@ -814,6 +1093,7 @@ def process_local_script_specimen():
     script_url = f'file://{os.path.abspath(local_path)}'
     scripts.add(script_url)
     processed.add(script_url)
+    upsert_crawl_record(script_url, source_page='local-file', source_kind='local-script', depth=0, state='active')
     record_artifact(script_url, 'local-file', 'local-script', 'local JS specimen')
     try:
         with open(local_path, 'r', encoding='utf-8') as handle:
@@ -821,10 +1101,12 @@ def process_local_script_specimen():
     except OSError as exc:
         failed.add(script_url)
         stats.bump('failures')
+        finalize_url_state(script_url, 'failed', error_kind='request-error', error_message=str(exc))
         print(f'{coffin}Could not read local script specimen: {exc}')
         return
     stats.bump('script_pages')
     note_content_type('application/javascript')
+    finalize_url_state(script_url, 'completed', status_code=200, content_type='application/javascript')
     update_artifact_observation(
         artifact_genealogy,
         script_url,
@@ -842,6 +1124,7 @@ def process_local_document_specimen():
     document_url = f'file://{os.path.abspath(local_path)}'
     files.add(document_url)
     processed.add(document_url)
+    upsert_crawl_record(document_url, source_page='local-file', source_kind='local-document', depth=0, state='active')
     record_artifact(document_url, 'local-file', 'local-document', 'local PDF specimen')
     try:
         with open(local_path, 'rb') as handle:
@@ -849,9 +1132,11 @@ def process_local_document_specimen():
     except OSError as exc:
         failed.add(document_url)
         stats.bump('failures')
+        finalize_url_state(document_url, 'failed', error_kind='request-error', error_message=str(exc))
         print(f'{coffin}Could not read local document specimen: {exc}')
         return
     note_content_type('application/pdf')
+    finalize_url_state(document_url, 'completed', status_code=200, content_type='application/pdf')
     metadata_records, leak_records = extract_document_records(document_url, payload, 'application/pdf')
     document_metadata.update(metadata_records)
     document_leaks.update(leak_records)
@@ -883,6 +1168,12 @@ if not resume_state:
     metadata = {'crawl_delay': None}
     if main_url:
         metadata = zap(main_url, args.archive, domain, host, internal, robots, proxies, headers)
+        robots_metadata['rules'] = list(metadata.get('robots_rules') or [])
+        robots_metadata['crawl_delay'] = metadata.get('crawl_delay')
+        sitemap_metadata['sitemap_urls'] = list(metadata.get('sitemap_urls') or [])
+        sitemap_metadata['queued_urls'] = list(metadata.get('sitemap_queued_urls') or [])
+        emit_webui_event('robots', robots_metadata)
+        emit_webui_event('sitemap', sitemap_metadata)
         if args.respect_robots_delay and metadata.get('crawl_delay') is not None:
             policy.update_robots_delay(metadata['crawl_delay'])
     seeded = set()
@@ -893,6 +1184,7 @@ if not resume_state:
             continue
         if is_in_scope(normalized_seed, host, domain, scope_mode, scope_allow, scope_deny):
             seeded.add(normalized_seed)
+            note_pending_url(normalized_seed, 'seed', 'seed')
         else:
             external.add(normalized_seed)
     internal.clear()
@@ -900,10 +1192,12 @@ if not resume_state:
     if direct_remote_js:
         direct_script_url = specimen_profile['crawl_roots'][0]
         scripts.add(direct_script_url)
+        note_pending_url(direct_script_url, main_url or direct_script_url, 'direct-script-specimen')
         record_artifact(direct_script_url, main_url or direct_script_url, 'direct-script-specimen', 'remote JS specimen')
     if direct_remote_pdf:
         direct_document_url = specimen_profile['crawl_roots'][0]
         files.add(direct_document_url)
+        note_pending_url(direct_document_url, main_url or direct_document_url, 'direct-document-specimen')
         record_artifact(direct_document_url, main_url or direct_document_url, 'direct-document-specimen', 'remote PDF specimen')
     if direct_local_html:
         process_inline_specimen()
@@ -914,6 +1208,12 @@ if not resume_state:
     write_checkpoint('seeded')
 elif args.respect_robots_delay:
     metadata = zap(main_url, False, domain, host, set(), set(), proxies, headers)
+    robots_metadata['rules'] = list(metadata.get('robots_rules') or [])
+    robots_metadata['crawl_delay'] = metadata.get('crawl_delay')
+    sitemap_metadata['sitemap_urls'] = list(metadata.get('sitemap_urls') or [])
+    sitemap_metadata['queued_urls'] = list(metadata.get('sitemap_queued_urls') or [])
+    emit_webui_event('robots', robots_metadata)
+    emit_webui_event('sitemap', sitemap_metadata)
     if metadata.get('crawl_delay') is not None:
         policy.update_robots_delay(metadata['crawl_delay'])
 
@@ -923,6 +1223,8 @@ for level in range(crawl_level):
         break
     if len(internal) <= len(processed) and len(internal) > 2 + len(args.seeds):
         break
+    for link in links:
+        upsert_crawl_record(link, depth=level + 1)
     print(f'{fang}🦇 Descending to depth {level + 1} — {len(links)} URL{"s" if len(links) != 1 else ""} to drain…')
     try:
         flash(extractor, links, thread_count)
@@ -939,6 +1241,7 @@ if not only_urls:
             continue
         if is_in_scope(normalized_script, host, domain, scope_mode, scope_allow, scope_deny):
             scripts.add(normalized_script)
+            note_pending_url(normalized_script, main_url, 'script-queue')
             record_artifact(normalized_script, main_url, 'script-queue', 'queued for js archaeology')
         else:
             external.add(normalized_script)

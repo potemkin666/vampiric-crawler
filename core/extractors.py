@@ -99,7 +99,7 @@ def link_extractor(page_url, response, context):
             if record_artifact and candidate in context['files']:
                 record_artifact(candidate, page_url, 'linked-file', 'anchor href')
             continue
-        scoped_link = context['mark_scope'](candidate)
+        scoped_link = context['mark_scope'](candidate, page_url, 'anchor-link')
         if not scoped_link:
             continue
         if context['verbose']:
@@ -287,10 +287,10 @@ def _record_discovered_reference(page_url, candidate, context, from_script=False
                 'script-inline' if from_script else 'page-inline',
                 'structured discovery',
             )
-        context['mark_scope'](normalized)
+        context['mark_scope'](normalized, page_url, 'structured-file')
     if '/graphql' in path:
         context['endpoints'].add(posixpath.normpath(urlsplit(normalized).path) or '/graphql')
     if '/api/' in path or path.endswith('/graphql') or path.endswith('/graphiql'):
         context['endpoints'].add(posixpath.normpath(urlsplit(normalized).path) or path)
     if is_link(normalized, context['processed'], context['files']):
-        context['mark_scope'](normalized)
+        context['mark_scope'](normalized, page_url, 'structured-link')

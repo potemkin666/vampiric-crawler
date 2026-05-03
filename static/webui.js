@@ -2,6 +2,7 @@ const state = {
   status: 'idle',
   timer: null,
   lastFeedKey: '',
+  sortKey: 'discovery_time',
 };
 
 const PRESET_CONFIG = {
@@ -105,6 +106,13 @@ const els = {
   modeHint: document.getElementById('modeHint'),
   configPreview: document.getElementById('configPreview'),
   resultSearch: document.getElementById('resultSearch'),
+  pauseStateBanner: document.getElementById('pauseStateBanner'),
+  pauseStateDetail: document.getElementById('pauseStateDetail'),
+  queuePanel: document.getElementById('queuePanel'),
+  robotsPanel: document.getElementById('robotsPanel'),
+  sitemapPanel: document.getElementById('sitemapPanel'),
+  resultSort: document.getElementById('resultSort'),
+  resultLedger: document.getElementById('resultLedger'),
 };
 
 function escapeHtml(value) {
@@ -250,6 +258,100 @@ function renderRecords(data) {
     : '<span class="empty-note">NO SEALED RECORDS YET</span>';
 }
 
+function renderPauseState(data) {
+  const paused = data.status === 'paused';
+  const resumeReady = Boolean(data.can_resume);
+  els.pauseStateBanner.textContent = paused
+    ? 'RITE PAUSED — RESUME IS AVAILABLE'
+    : (data.status === 'running' ? 'RITE RUNNING — PAUSE IS AVAILABLE' : 'NO SUSPENDED RITE');
+  els.pauseStateDetail.textContent = [
+    `Status: ${data.status_message || 'THE CRAWLER SLEEPS'}`,
+    `Detail: ${data.status_detail || 'Awaiting the next command.'}`,
+    `Pause button: ${data.can_pause ? 'enabled' : 'disabled'}`,
+    `Resume button: ${resumeReady ? 'enabled' : 'disabled'}`,
+  ].join('\n');
+}
+
+function renderQueue(data) {
+  const queue = data.queue || {};
+  const order = ['pending', 'active', 'completed', 'skipped'];
+  els.queuePanel.innerHTML = order.map((key) => {
+    const bucket = queue[key] || { count: 0, items: [] };
+    return `
+      <section class="queue-card">
+        <div class="panel-title">${escapeHtml(key)}</div>
+        <strong>${escapeHtml(bucket.count)}</strong>
+        <div class="queue-items">
+          ${(bucket.items && bucket.items.length)
+            ? bucket.items.map((item) => `<div class="result-item">${escapeHtml(item)}</div>`).join('')
+            : '<span class="empty-note">NONE</span>'}
+        </div>
+      </section>
+    `;
+  }).join('');
+}
+
+function renderRobots(data) {
+  const robots = data.robots_details || {};
+  const rules = robots.rules || [];
+  els.robotsPanel.textContent = rules.length
+    ? [
+      `Crawl-delay: ${robots.crawl_delay ?? 'none'}`,
+      '',
+      ...rules.map((rule) => `${rule.directive || 'RULE'} ${rule.path || ''}`.trim()),
+    ].join('\n')
+    : 'No robots rules observed yet.';
+}
+
+function renderSitemaps(data) {
+  const sitemap = data.sitemap_details || {};
+  const sitemapUrls = sitemap.sitemap_urls || [];
+  const queuedUrls = sitemap.queued_urls || [];
+  els.sitemapPanel.textContent = (sitemapUrls.length || queuedUrls.length)
+    ? [
+      'SITEMAP URLS',
+      ...(sitemapUrls.length ? sitemapUrls : ['-']),
+      '',
+      'QUEUED URLS',
+      ...(queuedUrls.length ? queuedUrls : ['-']),
+    ].join('\n')
+    : 'No sitemap sigils observed yet.';
+}
+
+function sortedResultRows(rows) {
+  const sortKey = state.sortKey || 'discovery_time';
+  return [...(rows || [])].sort((left, right) => {
+    const a = left?.[sortKey];
+    const b = right?.[sortKey];
+    if (sortKey === 'status_code' || sortKey === 'depth' || sortKey === 'discovery_time') {
+      return (Number(a || 0) - Number(b || 0)) || String(left.url || '').localeCompare(String(right.url || ''));
+    }
+    return String(a || '').localeCompare(String(b || '')) || String(left.url || '').localeCompare(String(right.url || ''));
+  });
+}
+
+function renderResultLedger(data) {
+  const rows = sortedResultRows(data.result_rows || []);
+  els.resultLedger.innerHTML = rows.length
+    ? rows.map((row) => `
+      <article class="result-row" data-result-row>
+        <strong>${escapeHtml(row.url || '-')}</strong>
+        <div class="result-meta">
+          <span>state=${escapeHtml(row.state || '-')}</span>
+          <span>status=${escapeHtml(row.status_code ?? '-')}</span>
+          <span>type=${escapeHtml(row.content_type || '-')}</span>
+          <span>depth=${escapeHtml(row.depth ?? '-')}</span>
+          <span>source=${escapeHtml(row.source_page || '-')}</span>
+          <span>discovery=#${escapeHtml(row.discovery_time ?? 0)}</span>
+        </div>
+        ${(row.error_message || row.error_kind)
+          ? `<div class="result-error">${escapeHtml(row.error_message || row.error_kind)}</div>`
+          : ''}
+      </article>
+    `).join('')
+    : '<span class="empty-note">NO RESULT RECORDS YET</span>';
+}
+
 function renderState(data) {
   state.status = data.status || 'idle';
   els.app.dataset.status = state.status;
@@ -260,6 +362,11 @@ function renderState(data) {
   els.errorConsole.textContent = (data.errors && data.errors.length)
     ? data.errors.join('\n')
     : ((data.logs && data.logs.length) ? data.logs.slice(-18).join('\n') : 'No omens yet.');
+  renderPauseState(data);
+  renderQueue(data);
+  renderRobots(data);
+  renderSitemaps(data);
+  renderResultLedger(data);
   renderPanels(data);
   renderExports(data);
   renderRecords(data);
@@ -361,6 +468,10 @@ function applyResultFilter() {
     const visible = !query || node.textContent.toLowerCase().includes(query);
     node.style.display = visible ? '' : 'none';
   });
+  document.querySelectorAll('[data-result-row]').forEach((node) => {
+    const visible = !query || node.textContent.toLowerCase().includes(query);
+    node.style.display = visible ? '' : 'none';
+  });
   document.querySelectorAll('#resultPanels .terminal-panel').forEach((panel) => {
     const anyVisible = Array.from(panel.querySelectorAll('.result-item')).some((item) => item.style.display !== 'none');
     const hasEmpty = panel.querySelector('.empty-note');
@@ -383,6 +494,10 @@ els.form.addEventListener('keydown', (event) => {
 });
 els.crawlMode.addEventListener('change', syncModeControls);
 els.resultSearch.addEventListener('input', applyResultFilter);
+els.resultSort.addEventListener('change', () => {
+  state.sortKey = els.resultSort.value;
+  refreshState();
+});
 
 els.beginButton.addEventListener('click', beginCrawl);
 els.pauseButton.addEventListener('click', togglePause);

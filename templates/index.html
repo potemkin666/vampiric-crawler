@@ -162,6 +162,19 @@
         </section>
       </section>
 
+      <section class="terminal-grid status-grid">
+        <section class="terminal-panel">
+          <div class="panel-title">PAUSE / RESUME STATE</div>
+          <div class="state-banner" id="pauseStateBanner">THE RITE IS DORMANT</div>
+          <pre class="terminal-log selectable compact-log" id="pauseStateDetail">Awaiting the next command.</pre>
+        </section>
+
+        <section class="terminal-panel">
+          <div class="panel-title">VISIBLE CRAWL QUEUE</div>
+          <div class="queue-grid" id="queuePanel"></div>
+        </section>
+      </section>
+
       <section class="terminal-grid content-grid">
         <section class="terminal-panel tall-panel">
           <div class="panel-title">LIVE CRAWL TRANSMISSION</div>
@@ -174,9 +187,36 @@
         </section>
       </section>
 
+      <section class="terminal-grid content-grid">
+        <section class="terminal-panel tall-panel">
+          <div class="panel-title">ROBOTS.TXT OMENS</div>
+          <pre class="terminal-log selectable" id="robotsPanel">No robots rules observed yet.</pre>
+        </section>
+
+        <section class="terminal-panel tall-panel">
+          <div class="panel-title">SITEMAP VIEWER</div>
+          <pre class="terminal-log selectable" id="sitemapPanel">No sitemap sigils observed yet.</pre>
+        </section>
+      </section>
+
       <section class="terminal-panel">
         <div class="panel-title">RESULT FILTER</div>
         <input id="resultSearch" type="search" placeholder="Filter result panels and items" autocomplete="off">
+      </section>
+
+      <section class="terminal-panel">
+        <div class="panel-title">SORTABLE RESULT LEDGER</div>
+        <div class="result-toolbar">
+          <label for="resultSort">SORT BY</label>
+          <select id="resultSort">
+            <option value="discovery_time">DISCOVERY TIME</option>
+            <option value="status_code">STATUS CODE</option>
+            <option value="content_type">CONTENT TYPE</option>
+            <option value="depth">DEPTH</option>
+            <option value="source_page">SOURCE PAGE</option>
+          </select>
+        </div>
+        <div class="result-ledger" id="resultLedger"></div>
       </section>
 
       <section class="panel-stack" id="resultPanels"></section>

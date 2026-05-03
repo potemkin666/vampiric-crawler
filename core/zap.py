@@ -177,7 +177,7 @@ def _parse_robots(main_url, internal, headers=None, proxies=None):
                 internal.add(seeded)
 
     robots.update(sitemaps)
-    return robots, sitemaps, crawl_delay
+    return robots, rules, sitemaps, crawl_delay
 
 
 def _parse_sitemap_body(body, base_url):
@@ -214,6 +214,7 @@ def _parse_sitemaps(main_url, internal, sitemap_hints=None, headers=None, proxie
     """Discover URLs from sitemap files, following nested sitemap indexes."""
     queue = deque()
     visited = set()
+    discovered_urls = set()
 
     def enqueue(url):
         normalized = normalize_url(url, base_url=main_url)
@@ -237,10 +238,11 @@ def _parse_sitemaps(main_url, internal, sitemap_hints=None, headers=None, proxie
 
         page_urls, nested_sitemaps = _parse_sitemap_body(body, base_url=sitemap_url)
         internal.update(page_urls)
+        discovered_urls.update(page_urls)
         for nested in nested_sitemaps:
             enqueue(nested)
 
-    return visited
+    return visited, discovered_urls
 
 
 def _archive_queries(domain, host):
@@ -324,14 +326,14 @@ def _archives(domain, host, internal, headers=None, proxies=None):
 def _seed_from_robots(main_url, use_wayback, domain, host, internal, robots, proxies,
                       headers=None):
     proxy = proxies[0] if proxies else None
-    robot_entries, sitemap_hints, crawl_delay = _parse_robots(
+    robot_entries, rules, sitemap_hints, crawl_delay = _parse_robots(
         main_url,
         internal,
         headers=headers,
         proxies=proxy,
     )
     robots.update(robot_entries)
-    _parse_sitemaps(
+    discovered_sitemaps, queued_urls = _parse_sitemaps(
         main_url,
         internal,
         sitemap_hints=sitemap_hints,
@@ -340,6 +342,12 @@ def _seed_from_robots(main_url, use_wayback, domain, host, internal, robots, pro
     )
     return {
         'crawl_delay': crawl_delay,
+        'robots_rules': [
+            {'directive': directive, 'path': path}
+            for directive, path in rules
+        ],
+        'sitemap_urls': sorted(discovered_sitemaps | set(sitemap_hints)),
+        'sitemap_queued_urls': sorted(queued_urls),
     }
 
 

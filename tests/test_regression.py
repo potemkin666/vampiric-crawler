@@ -412,6 +412,36 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(sitemaps, {'https://example.com/sitemap.xml'})
         self.assertEqual(crawl_delay, 3.0)
 
+    def test_seed_from_robots_returns_rule_and_sitemap_metadata(self):
+        internal = set()
+
+        def fake_fetch(url, timeout=8, headers=None, proxies=None):
+            if url.endswith('/robots.txt'):
+                return 'User-agent: *\nAllow: /page\nDisallow: /hidden\nSitemap: https://example.com/sitemap.xml\n'
+            if url.endswith('/sitemap.xml'):
+                return '<urlset><url><loc>https://example.com/page</loc></url></urlset>'
+            return ''
+
+        with patch('core.zap._fetch', side_effect=fake_fetch):
+            robots = set()
+            metadata = zap._seed_from_robots(
+                'https://example.com',
+                False,
+                'example.com',
+                'example.com',
+                internal,
+                robots,
+                [],
+            )
+
+        self.assertIn('https://example.com/page', internal)
+        self.assertEqual(metadata['robots_rules'], [
+            {'directive': 'ALLOW', 'path': '/page'},
+            {'directive': 'DISALLOW', 'path': '/hidden'},
+        ])
+        self.assertIn('https://example.com/sitemap.xml', metadata['sitemap_urls'])
+        self.assertEqual(metadata['sitemap_queued_urls'], ['https://example.com/page'])
+
     def test_checkpoint_round_trip_restores_sets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint = os.path.join(tmpdir, 'crawl.json')
@@ -985,6 +1015,34 @@ class RegressionTests(unittest.TestCase):
             (output_dir / 'intel.txt').write_text('https://example.com:EMAIL:test@example.com\n', encoding='utf-8')
             (output_dir / 'failed.txt').write_text('https://example.com/admin\n', encoding='utf-8')
             (output_dir / 'stats.txt').write_text('visited=2\nfailures=1\nredirects=0\n', encoding='utf-8')
+            checkpoint.write_text(json.dumps({
+                'version': 1,
+                'queue_state': {
+                    'pending': ['https://example.com/contact'],
+                    'active': ['https://example.com/about'],
+                    'completed': ['https://example.com/'],
+                    'skipped': ['https://example.com/report.pdf'],
+                },
+                'crawl_records': {
+                    'https://example.com/': {
+                        'url': 'https://example.com/',
+                        'status_code': 200,
+                        'content_type': 'text/html',
+                        'depth': 1,
+                        'source_page': 'seed',
+                        'discovery_time': 1,
+                        'state': 'completed',
+                    },
+                },
+                'robots_metadata': {
+                    'rules': [{'directive': 'DISALLOW', 'path': '/hidden'}],
+                    'crawl_delay': 1,
+                },
+                'sitemap_metadata': {
+                    'sitemap_urls': ['https://example.com/sitemap.xml'],
+                    'queued_urls': ['https://example.com/about'],
+                },
+            }), encoding='utf-8')
             manager.current_run = CrawlRun(
                 run_id='sealed-record',
                 payload={'target_url': 'https://example.com', 'depth': 2, 'threads': 4, 'mode': 'document'},
@@ -1008,6 +1066,10 @@ class RegressionTests(unittest.TestCase):
                 self.assertTrue(any(panel['key'] == 'documents' for panel in state_data['panels']))
                 self.assertTrue(any(item['kind'] == 'autopsy-md' for item in state_data['exports']))
                 self.assertTrue(any(item['kind'] == 'bundle' for item in state_data['exports']))
+                self.assertEqual(state_data['queue']['pending']['count'], 1)
+                self.assertEqual(state_data['robots_details']['crawl_delay'], 1)
+                self.assertEqual(state_data['sitemap_details']['sitemap_urls'], ['https://example.com/sitemap.xml'])
+                self.assertEqual(state_data['result_rows'][0]['source_page'], 'seed')
 
                 autopsy_response = client.get('/api/exports/autopsy-md')
                 self.assertEqual(autopsy_response.status_code, 200)
