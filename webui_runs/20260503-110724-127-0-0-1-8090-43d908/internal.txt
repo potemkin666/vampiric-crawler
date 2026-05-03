@@ -1,0 +1,30 @@
+http://127.0.0.1:8090/
+http://127.0.0.1:8090/%3C!DOCTYPE%20HTML%3E
+http://127.0.0.1:8090/%3C/body%3E
+http://127.0.0.1:8090/%3C/head%3E
+http://127.0.0.1:8090/%3C/html%3E
+http://127.0.0.1:8090/%3Cbody%3E
+http://127.0.0.1:8090/%3Ch1%3EError%20response%3C/h1%3E
+http://127.0.0.1:8090/%3Chead%3E
+http://127.0.0.1:8090/%3Chtml%20lang=%22en%22%3E
+http://127.0.0.1:8090/%3Cmeta%20charset=%22utf-8%22%3E
+http://127.0.0.1:8090/%3Cp%3EError%20code%20explanation:%20404%20-%20Nothing%20matches%20the%20given%20URI.%3C/p%3E
+http://127.0.0.1:8090/%3Cp%3EError%20code:%20404%3C/p%3E
+http://127.0.0.1:8090/%3Cp%3EMessage:%20File%20not%20found.%3C/p%3E
+http://127.0.0.1:8090/%3Ctitle%3EError%20response%3C/title%3E
+http://127.0.0.1:8090/<!DOCTYPE HTML>
+http://127.0.0.1:8090/</body>
+http://127.0.0.1:8090/</head>
+http://127.0.0.1:8090/</html>
+http://127.0.0.1:8090/<body>
+http://127.0.0.1:8090/<h1>Error response</h1>
+http://127.0.0.1:8090/<head>
+http://127.0.0.1:8090/<html lang="en">
+http://127.0.0.1:8090/<meta charset="utf-8">
+http://127.0.0.1:8090/<p>Error code explanation: 404 - Nothing matches the given URI.</p>
+http://127.0.0.1:8090/<p>Error code: 404</p>
+http://127.0.0.1:8090/<p>Message: File not found.</p>
+http://127.0.0.1:8090/<title>Error response</title>
+http://127.0.0.1:8090/api/test
+http://127.0.0.1:8090/app.js
+http://127.0.0.1:8090/page2.html

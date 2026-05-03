@@ -1,0 +1,12 @@
+binary_skips=0
+client_errors=26
+empty_responses=0
+failures=26
+markup_pages=3
+redirects=0
+requests=30
+script_pages=1
+server_errors=0
+skipped=0
+successes=4
+visited=29

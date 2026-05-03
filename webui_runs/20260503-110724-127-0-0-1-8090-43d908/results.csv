@@ -1,0 +1,71 @@
+category,value
+internal,http://127.0.0.1:8090/
+internal,http://127.0.0.1:8090/%3C!DOCTYPE%20HTML%3E
+internal,http://127.0.0.1:8090/%3C/body%3E
+internal,http://127.0.0.1:8090/%3C/head%3E
+internal,http://127.0.0.1:8090/%3C/html%3E
+internal,http://127.0.0.1:8090/%3Cbody%3E
+internal,http://127.0.0.1:8090/%3Ch1%3EError%20response%3C/h1%3E
+internal,http://127.0.0.1:8090/%3Chead%3E
+internal,http://127.0.0.1:8090/%3Chtml%20lang=%22en%22%3E
+internal,http://127.0.0.1:8090/%3Cmeta%20charset=%22utf-8%22%3E
+internal,http://127.0.0.1:8090/%3Cp%3EError%20code%20explanation:%20404%20-%20Nothing%20matches%20the%20given%20URI.%3C/p%3E
+internal,http://127.0.0.1:8090/%3Cp%3EError%20code:%20404%3C/p%3E
+internal,http://127.0.0.1:8090/%3Cp%3EMessage:%20File%20not%20found.%3C/p%3E
+internal,http://127.0.0.1:8090/%3Ctitle%3EError%20response%3C/title%3E
+internal,http://127.0.0.1:8090/<!DOCTYPE HTML>
+internal,http://127.0.0.1:8090/</body>
+internal,http://127.0.0.1:8090/</head>
+internal,http://127.0.0.1:8090/</html>
+internal,http://127.0.0.1:8090/<body>
+internal,http://127.0.0.1:8090/<h1>Error response</h1>
+internal,http://127.0.0.1:8090/<head>
+internal,"http://127.0.0.1:8090/<html lang=""en"">"
+internal,"http://127.0.0.1:8090/<meta charset=""utf-8"">"
+internal,http://127.0.0.1:8090/<p>Error code explanation: 404 - Nothing matches the given URI.</p>
+internal,http://127.0.0.1:8090/<p>Error code: 404</p>
+internal,http://127.0.0.1:8090/<p>Message: File not found.</p>
+internal,http://127.0.0.1:8090/<title>Error response</title>
+internal,http://127.0.0.1:8090/api/test
+internal,http://127.0.0.1:8090/app.js
+internal,http://127.0.0.1:8090/page2.html
+scripts,http://127.0.0.1:8090/app.js
+endpoints,/api/test
+failed,http://127.0.0.1:8090/%3C!DOCTYPE%20HTML%3E
+failed,http://127.0.0.1:8090/%3C/body%3E
+failed,http://127.0.0.1:8090/%3C/head%3E
+failed,http://127.0.0.1:8090/%3C/html%3E
+failed,http://127.0.0.1:8090/%3Cbody%3E
+failed,http://127.0.0.1:8090/%3Ch1%3EError%20response%3C/h1%3E
+failed,http://127.0.0.1:8090/%3Chead%3E
+failed,http://127.0.0.1:8090/%3Chtml%20lang=%22en%22%3E
+failed,http://127.0.0.1:8090/%3Cmeta%20charset=%22utf-8%22%3E
+failed,http://127.0.0.1:8090/%3Cp%3EError%20code%20explanation:%20404%20-%20Nothing%20matches%20the%20given%20URI.%3C/p%3E
+failed,http://127.0.0.1:8090/%3Cp%3EError%20code:%20404%3C/p%3E
+failed,http://127.0.0.1:8090/%3Cp%3EMessage:%20File%20not%20found.%3C/p%3E
+failed,http://127.0.0.1:8090/%3Ctitle%3EError%20response%3C/title%3E
+failed,http://127.0.0.1:8090/<!DOCTYPE HTML>
+failed,http://127.0.0.1:8090/</body>
+failed,http://127.0.0.1:8090/</head>
+failed,http://127.0.0.1:8090/</html>
+failed,http://127.0.0.1:8090/<body>
+failed,http://127.0.0.1:8090/<h1>Error response</h1>
+failed,http://127.0.0.1:8090/<head>
+failed,"http://127.0.0.1:8090/<html lang=""en"">"
+failed,"http://127.0.0.1:8090/<meta charset=""utf-8"">"
+failed,http://127.0.0.1:8090/<p>Error code explanation: 404 - Nothing matches the given URI.</p>
+failed,http://127.0.0.1:8090/<p>Error code: 404</p>
+failed,http://127.0.0.1:8090/<p>Message: File not found.</p>
+failed,http://127.0.0.1:8090/<title>Error response</title>
+stats,binary_skips=0
+stats,client_errors=26
+stats,empty_responses=0
+stats,failures=26
+stats,markup_pages=3
+stats,redirects=0
+stats,requests=30
+stats,script_pages=1
+stats,server_errors=0
+stats,skipped=0
+stats,successes=4
+stats,visited=29
