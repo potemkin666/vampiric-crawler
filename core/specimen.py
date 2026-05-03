@@ -20,6 +20,7 @@ HANDLE_RE = re.compile(r'^@?[a-z0-9_.-]{2,64}$', re.I)
 URL_RE = re.compile(r'^https?://', re.I)
 HTML_RE = re.compile(r'<(?:!doctype\s+html|html|head|body|a\b|form\b|script\b)', re.I)
 ARCHIVE_HOSTS = ('web.archive.org', 'archive.ph', 'archive.is', 'archive.today')
+SAFE_LOCAL_PATH_RE = re.compile(r'^(?:/|[A-Za-z]:[\\/])[A-Za-z0-9._/\-\\ ]{1,4096}$')
 
 SPECIMEN_KIND_CHOICES = (
     'auto', 'domain', 'url', 'company', 'handle', 'sitemap',
@@ -252,8 +253,11 @@ def _read_text_file(path: str) -> str:
 def _normalize_local_path(raw: str) -> str:
     if not raw:
         return ''
+    candidate = raw.strip()
+    if not SAFE_LOCAL_PATH_RE.fullmatch(candidate):
+        return ''
     try:
-        path = Path(raw).expanduser()
+        path = Path(candidate)
         if path.suffix.lower() not in ALLOWED_LOCAL_SUFFIXES:
             return ''
         resolved = path.resolve(strict=True)
