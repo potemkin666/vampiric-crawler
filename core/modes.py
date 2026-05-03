@@ -49,6 +49,105 @@ MODE_DEFINITIONS = {
     },
 }
 
+RITUAL_CHAIN_DEFINITIONS = {
+    'domain_necropsy': {
+        'label': 'Domain necropsy',
+        'description': 'Classify a web target, walk the live surface, and summarize exposed organs.',
+        'default_mode': 'generic',
+        'supported_specimens': ('url', 'domain', 'sitemap', 'html'),
+        'defaults': {
+            'archive_seeds': True,
+            'respect_robots_delay': True,
+        },
+    },
+    'dead_page_resurrection': {
+        'label': 'Dead page resurrection',
+        'description': 'Use archive hints, temporal diffs, and broken-path analysis to revive dead surfaces.',
+        'default_mode': 'temporal',
+        'supported_specimens': ('dead_url', 'archived_url', 'url'),
+        'defaults': {
+            'archive_seeds': True,
+            'respect_robots_delay': True,
+        },
+    },
+    'js_bone_saw': {
+        'label': 'JS bone saw',
+        'description': 'Prioritize script extraction and endpoint archaeology over broad page walking.',
+        'default_mode': 'js-intel',
+        'supported_specimens': ('js', 'url', 'domain'),
+        'defaults': {
+            'extract_secrets': True,
+            'render_js': False,
+        },
+    },
+    'pdf_fossil_dig': {
+        'label': 'PDF fossil dig',
+        'description': 'Harvest linked documents, metadata, and archive shadows around document trails.',
+        'default_mode': 'document',
+        'supported_specimens': ('pdf', 'url', 'domain'),
+        'defaults': {
+            'archive_seeds': True,
+            'render_js': False,
+        },
+    },
+    'scam_smell_test': {
+        'label': 'Scam smell test',
+        'description': 'Bias the crawl toward manipulative flows, cloned trust signals, and fake urgency.',
+        'default_mode': 'scam',
+        'supported_specimens': ('url', 'domain', 'company', 'handle'),
+        'defaults': {
+            'render_js': True,
+        },
+    },
+    'forum_bloodline': {
+        'label': 'Forum bloodline',
+        'description': 'Track thread ancestry, replies, quotes, and deleted-user shadows across discussions.',
+        'default_mode': 'forum',
+        'supported_specimens': ('url', 'domain'),
+        'defaults': {
+            'render_js': True,
+        },
+    },
+    'news_mutation_trace': {
+        'label': 'News mutation trace',
+        'description': 'Map how a story mutates across article surfaces, archives, and references.',
+        'default_mode': 'news',
+        'supported_specimens': ('url', 'domain'),
+        'defaults': {
+            'archive_seeds': True,
+            'render_js': True,
+        },
+    },
+}
+
+PRESET_DEFINITIONS = {
+    'balanced': {
+        'label': 'Balanced',
+        'description': 'Sensible defaults for most hunts.',
+        'defaults': {'depth': 2, 'threads': 4, 'delay': 0.0, 'timeout': 8.0},
+    },
+    'quick': {
+        'label': 'Quick',
+        'description': 'Fast first pass with shallow depth and minimal ceremony.',
+        'defaults': {'depth': 1, 'threads': 6, 'delay': 0.0, 'timeout': 6.0},
+    },
+    'polite': {
+        'label': 'Polite',
+        'description': 'Lower concurrency and higher delays for fragile targets.',
+        'defaults': {'depth': 2, 'threads': 2, 'delay': 0.75, 'timeout': 10.0},
+    },
+    'document-heavy': {
+        'label': 'Document-heavy',
+        'description': 'Bias toward linked document harvesting and archive context.',
+        'defaults': {'depth': 2, 'threads': 3, 'delay': 0.25, 'timeout': 10.0, 'archive_seeds': True},
+    },
+    'javascript-heavy': {
+        'label': 'JavaScript-heavy',
+        'description': 'Bias toward rendering and script archaeology.',
+        'defaults': {'depth': 2, 'threads': 4, 'delay': 0.15, 'timeout': 10.0, 'render_js': True, 'extract_secrets': True},
+    },
+}
+
 MODE_DATASET_NAMES = (
     'document_metadata',
     'document_leaks',
@@ -112,6 +211,13 @@ JS_FEATURE_RE = re.compile(r'(?i)\b([A-Za-z0-9_$]{3,64}(?:Flag|Feature|Toggle|En
 JS_CONFIG_RE = re.compile(r'(?i)\b(config|settings|runtimeConfig|env)\b\s*[:=]\s*(\{.{1,240}?\})', re.S)
 JS_ROUTE_RE = re.compile(r'(?i)\b(?:route|router|path|pathname)\b[^"\']{0,40}["\']([^"\']{2,200})["\']')
 JS_METHOD_RE = re.compile(r'\b(GET|POST|PUT|PATCH|DELETE)\b\s*["\']([^"\']{1,200})["\']')
+JS_URL_RE = re.compile(r'https?://[^\s"\']{4,240}')
+JS_ANALYTICS_RE = re.compile(r'(?i)\b(?:G-[A-Z0-9]{6,12}|UA-\d{4,12}-\d+|GTM-[A-Z0-9]{4,12})\b')
+JS_STORAGE_RE = re.compile(r'https?://[^\s"\']+(?:amazonaws\.com|cloudfront\.net|blob\.core\.windows\.net|storage\.googleapis\.com|cdn\.)[^\s"\']*', re.I)
+JS_ERROR_RE = re.compile(r'(?i)(?:throw\s+new\s+\w+\(|console\.(?:error|warn)\(|error\s*:\s*["\'])([^"\']{6,180})')
+JS_COMMENT_RE = re.compile(r'(?://[^\n]{5,200}|/\*[\s\S]{5,240}?\*/)')
+JS_VIEW_RE = re.compile(r'(?i)\b(?:template|view|screen|component|page)\b\s*[:=]\s*["\']([^"\']{2,120})["\']')
+JS_ENV_RE = re.compile(r'(?i)\b(?:process\.env\.[A-Z0-9_]+|REACT_APP_[A-Z0-9_]+|NEXT_PUBLIC_[A-Z0-9_]+|VITE_[A-Z0-9_]+)\b')
 
 
 def coerce_mode(value: str | None) -> str:
@@ -119,6 +225,20 @@ def coerce_mode(value: str | None) -> str:
     if value in MODE_DEFINITIONS:
         return value
     return 'generic'
+
+
+def coerce_ritual_chain(value: str | None) -> str:
+    """Return a supported ritual chain."""
+    if value in RITUAL_CHAIN_DEFINITIONS:
+        return value
+    return 'domain_necropsy'
+
+
+def coerce_preset(value: str | None) -> str:
+    """Return a supported crawl preset."""
+    if value in PRESET_DEFINITIONS:
+        return value
+    return 'balanced'
 
 
 def strip_tags(value: str) -> str:
@@ -208,6 +328,25 @@ def extract_js_intel(script_url: str, response: str) -> set[str]:
         findings.add(f'script={script_url} route={route}')
     for method, route in JS_METHOD_RE.findall(response):
         findings.add(f'script={script_url} api={method}:{route}')
+    for match in JS_URL_RE.findall(response):
+        if '/graphql' in match.lower():
+            findings.add(f'script={script_url} graphql={match}')
+        elif '/api/' in match.lower():
+            findings.add(f'script={script_url} api_url={match}')
+    for match in JS_ANALYTICS_RE.findall(response):
+        findings.add(f'script={script_url} analytics_id={match}')
+    for match in JS_STORAGE_RE.findall(response):
+        findings.add(f'script={script_url} storage={match}')
+    for match in JS_ERROR_RE.findall(response):
+        findings.add(f'script={script_url} error_hint={match.strip()[:140]}')
+    for match in JS_COMMENT_RE.findall(response):
+        compact = re.sub(r'\s+', ' ', match.replace('/*', '').replace('*/', '').replace('//', '')).strip()
+        if compact and len(compact) >= 8:
+            findings.add(f'script={script_url} comment={compact[:140]}')
+    for match in JS_VIEW_RE.findall(response):
+        findings.add(f'script={script_url} view={match}')
+    for match in JS_ENV_RE.findall(response):
+        findings.add(f'script={script_url} env_hint={match}')
     return findings
 
 

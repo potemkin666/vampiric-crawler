@@ -27,7 +27,8 @@
         <div class="hero-copy">
           <p class="eyebrow">NOCTURNAL ABBEY MAINFRAME // BLOOD-SOAKED RECON DAEMON</p>
           <h1>Catacomb Console of the Vampiric Crawler</h1>
-          <p class="subcopy">Name a prey, choose a rite, descend through cursed halls, exhume relics, read omens, and seal the harvest before dawn notices.</p>
+          <p class="subcopy">Name a specimen, choose a rite, inspect the preview, descend through cursed halls, exhume relics, read omens, and seal the autopsy before dawn notices.</p>
+          <p class="subcopy">Example specimen: <code>https://example.com</code>, <code>example.com</code>, <code>/tmp/specimen.js</code>, or pasted HTML.</p>
         </div>
         <div class="status-banner">
           <div>
@@ -40,19 +41,58 @@
 
       <section class="terminal-grid controls-grid">
         <form class="terminal-panel command-panel" id="crawlForm">
-          <div class="panel-title">TARGET URL // COMMAND PROMPT</div>
-          <label class="terminal-label" for="targetUrl">TARGET URL</label>
+          <div class="panel-title">TARGET SPECIMEN // COMMAND PROMPT</div>
+          <label class="terminal-label" for="targetUrl">TARGET SPECIMEN</label>
           <div class="command-input-wrap">
             <span class="prompt-glyph">&gt;</span>
             <span class="prompt-verb">CRAWL</span>
-            <input id="targetUrl" name="targetUrl" type="url" placeholder="https://example.com" required inputmode="url" autocomplete="off">
+            <input id="targetUrl" name="targetUrl" type="text" placeholder="https://example.com or example.com or pasted HTML" required autocomplete="off" title="Accepts URL, domain, JS/PDF path, or pasted HTML.">
             <span class="cursor" aria-hidden="true"></span>
           </div>
           <div class="command-preview" id="commandPreview">&gt; CRAWL https://example.com --depth 2</div>
 
           <div class="field-grid">
             <label>
-              <span>RITE OF THE NIGHT</span>
+              <span title="Higher-level workflow chosen before low-level mode.">RITUAL CHAIN</span>
+              <select id="ritualChain" name="ritualChain">
+                <option value="">AUTO SELECT</option>
+                <option value="domain_necropsy">DOMAIN NECROPSY</option>
+                <option value="dead_page_resurrection">DEAD PAGE RESURRECTION</option>
+                <option value="js_bone_saw">JS BONE SAW</option>
+                <option value="pdf_fossil_dig">PDF FOSSIL DIG</option>
+                <option value="scam_smell_test">SCAM SMELL TEST</option>
+                <option value="forum_bloodline">FORUM BLOODLINE</option>
+                <option value="news_mutation_trace">NEWS MUTATION TRACE</option>
+              </select>
+            </label>
+            <label>
+              <span title="Optional preset defaults for depth, delay, rendering, and concurrency.">PRESET CONFIG</span>
+              <select id="crawlPreset" name="crawlPreset">
+                <option value="balanced">BALANCED</option>
+                <option value="quick">QUICK</option>
+                <option value="polite">POLITE</option>
+                <option value="document-heavy">DOCUMENT HEAVY</option>
+                <option value="javascript-heavy">JAVASCRIPT HEAVY</option>
+              </select>
+            </label>
+            <label>
+              <span title="Force classification when auto-detection is wrong.">SPECIMEN KIND</span>
+              <select id="inputKind" name="inputKind">
+                <option value="auto">AUTO</option>
+                <option value="url">URL</option>
+                <option value="domain">DOMAIN</option>
+                <option value="sitemap">SITEMAP</option>
+                <option value="pdf">PDF</option>
+                <option value="js">JS</option>
+                <option value="html">HTML</option>
+                <option value="handle">HANDLE</option>
+                <option value="company">COMPANY</option>
+                <option value="archived_url">ARCHIVED URL</option>
+                <option value="dead_url">DEAD URL</option>
+              </select>
+            </label>
+            <label>
+              <span title="Low-level extraction mode override.">RITE OF THE NIGHT</span>
               <select id="crawlMode" name="crawlMode">
                 <option value="generic">GENERIC HUNT</option>
                 <option value="document">DOCUMENT HARVESTER</option>
@@ -83,6 +123,7 @@
             </label>
           </div>
           <div class="mode-hint" id="modeHint">GENERIC HUNT // Balanced reconnaissance across pages, forms, scripts, and relics.</div>
+          <pre class="terminal-log selectable" id="configPreview">Awaiting preview…</pre>
         </form>
 
         <section class="terminal-panel settings-panel">
@@ -95,6 +136,7 @@
             <label class="flag-option" data-flag="render"><input id="renderJs" type="checkbox"><span>[ ] RENDER SHADOW DOM</span></label>
             <label class="flag-option" data-flag="archive"><input id="archiveSeeds" type="checkbox"><span>[ ] WAKE ARCHIVE SEEDS</span></label>
             <label class="flag-option" data-flag="dns"><input id="dns" type="checkbox"><span>[ ] TRACE BLOODLINES (DNS)</span></label>
+            <label class="flag-option" data-flag="dry"><input id="dryRun" type="checkbox"><span>[ ] DRY RUN ONLY</span></label>
           </div>
           <div class="command-buttons">
             <button type="button" id="beginButton" class="terminal-button terminal-button--primary">&gt; OPEN THE CRYPT</button>
@@ -130,6 +172,11 @@
           <div class="panel-title">STATUS AND ERROR CONSOLE</div>
           <pre class="terminal-log selectable" id="errorConsole">No omens yet.</pre>
         </section>
+      </section>
+
+      <section class="terminal-panel">
+        <div class="panel-title">RESULT FILTER</div>
+        <input id="resultSearch" type="search" placeholder="Filter result panels and items" autocomplete="off">
       </section>
 
       <section class="panel-stack" id="resultPanels"></section>

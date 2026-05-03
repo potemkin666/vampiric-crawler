@@ -34,15 +34,33 @@ from core.colors import (
     dark_red, green, end, bold,
 )
 from core.checkpoint import load_checkpoint, normalize_checkpoint_sets, save_checkpoint
+from core.checkpoint import normalize_checkpoint_mapping
 import core.config
+from core.autopsy import (
+    ANALYSIS_DATASET_NAMES,
+    anatomy_lines,
+    build_autopsy,
+    build_mutation_probes,
+    build_site_anatomy,
+    finalize_genealogy,
+    genealogy_lines,
+    mutation_lines,
+    record_artifact_discovery,
+    update_artifact_observation,
+    write_autopsy_files,
+)
 from core.config import INTELS
 from core.extractors import run_page_extractors, run_script_extractors
 from core.flash import flash
 from core.modes import (
     DOCUMENT_EXTENSIONS,
     MODE_DATASET_NAMES,
+    PRESET_DEFINITIONS,
+    RITUAL_CHAIN_DEFINITIONS,
     build_hidden_candidates,
     build_temporal_diffs,
+    coerce_preset,
+    coerce_ritual_chain,
     coerce_mode,
     extract_document_records,
 )
@@ -68,6 +86,13 @@ from core.utils import (
     is_good_proxy,
 )
 from core.zap import zap
+from core.specimen import (
+    SPECIMEN_KIND_CHOICES,
+    apply_preset,
+    classify_specimen,
+    resolve_ritual_plan,
+    setup_status,
+)
 
 BANNER = f"""
 {dark_red}🦇 Vampiric Crawler{end}  {crypt}v1.1.0{end}
@@ -85,6 +110,7 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
 )
 parser.add_argument('-u', '--url', help='Target URL (the prey)', dest='root', required=False)
+parser.add_argument('--target', help='Target specimen (URL, domain, PDF, JS file, HTML paste, handle, or company name)')
 parser.add_argument('-l', '--level', help='Depth of the hunt (default: 2)', dest='level', type=int, default=2)
 parser.add_argument('-t', '--threads', help='Number of simultaneous fangs (default: 4)', dest='threads', type=int, default=4)
 parser.add_argument('-d', '--delay', help='Delay between feedings in seconds (default: 0)', dest='delay', type=float, default=0)
@@ -106,7 +132,12 @@ parser.add_argument('--only-urls', help='Only harvest URLs, skip intel extractio
 parser.add_argument('--scope', help='Scope of the hunt: exact host or full registered domain', dest='scope', choices=['host', 'domain'], default='host')
 parser.add_argument('--scope-allow', help='Extra regex that URLs must match to stay in scope (repeatable)', action='append', default=[])
 parser.add_argument('--scope-deny', help='Regex that forces URLs out of scope even if host/domain matches (repeatable)', action='append', default=[])
-parser.add_argument('--mode', help='Focused crawl mode (default: generic)', choices=['generic', 'document', 'js-intel', 'forum', 'geo', 'news', 'hidden', 'scam', 'temporal'], default='generic')
+parser.add_argument('--mode', help='Focused crawl mode override', choices=['generic', 'document', 'js-intel', 'forum', 'geo', 'news', 'hidden', 'scam', 'temporal'])
+parser.add_argument('--ritual-chain', help='Higher-level crawl workflow', choices=sorted(RITUAL_CHAIN_DEFINITIONS))
+parser.add_argument('--preset', help='Preset crawl configuration', choices=sorted(PRESET_DEFINITIONS), default='balanced')
+parser.add_argument('--input-kind', help='Force specimen classification', choices=SPECIMEN_KIND_CHOICES, default='auto')
+parser.add_argument('--dry-run', help='Show the resolved crawl plan without making requests', action='store_true')
+parser.add_argument('--setup-check', help='Check Python and Playwright prerequisites, then exit', action='store_true')
 parser.add_argument('--render-js', help='Render pages in headless Chromium before extraction', action='store_true')
 parser.add_argument('--render-timeout', help='Per-page render timeout in seconds (default: 12)', type=float, default=12)
 parser.add_argument('--checkpoint', help='Write crawl state to this checkpoint file')
@@ -118,6 +149,16 @@ parser.add_argument('--disable-adaptive-backoff', help='Disable automatic backof
 parser.add_argument('-v', '--verbose', help='Show every drop of blood (verbose output)', dest='verbose', action='store_true')
 args = parser.parse_args()
 
+if args.setup_check:
+    status = setup_status()
+    print(f'{fang}First-run setup check')
+    print(f'{crypt}Install Python deps: {status["install_hint"]}')
+    print(f'{crypt}Install browser:    {status["browser_hint"]}')
+    for module_name, module_status in sorted(status['packages'].items()):
+        print(f'{fang}{module_name:<12} {module_status}')
+    print(f'{fang}playwright-browser {status["playwright_browser"]}')
+    sys.exit(0 if all(value == 'ok' for value in status['packages'].values()) and status['playwright_browser'] == 'ok' else 1)
+
 resume_state = None
 if args.resume:
     try:
@@ -125,32 +166,97 @@ if args.resume:
     except Exception as exc:
         print(f'{coffin}Could not resume from checkpoint: {exc}')
         sys.exit(1)
-    if not args.root:
+    if not args.root and not args.target:
         args.root = resume_state.get('main_url')
 
-if not args.root:
-    print(f'\n{coffin}No prey specified. Use {bold}-u <URL>{end} to choose a target.\n')
+target_input = args.target or args.root or (resume_state.get('specimen_input') if resume_state else '')
+if not target_input:
+    print(f'\n{coffin}No prey specified. Use {bold}-u <URL>{end} or {bold}--target <SPECIMEN>{end} to choose a target.\n')
     parser.print_help()
     sys.exit(1)
 
 core.config.verbose = args.verbose
 verbose = args.verbose
-delay = args.delay
-timeout = args.timeout
 cook = args.cook or None
-api = bool(args.api)
-only_urls = bool(args.only_urls)
-crawl_level = args.level
-thread_count = args.threads
-scope_mode = args.scope
 checkpoint_path = args.checkpoint or args.resume
-mode = coerce_mode(resume_state.get('mode') if resume_state and '--mode' not in sys.argv[1:] else args.mode)
 temporal_baseline = args.temporal_baseline
+
+
+def cli_arg_present(*names):
+    return any(name in sys.argv[1:] for name in names)
+
+
+specimen_kind = (
+    resume_state.get('specimen_kind')
+    if resume_state and not cli_arg_present('--input-kind') and args.input_kind == 'auto'
+    else args.input_kind
+)
+specimen_profile = (
+    resume_state.get('specimen_profile')
+    if resume_state and not cli_arg_present('--input-kind', '--target', '-u', '--url')
+    else classify_specimen(target_input, specimen_kind)
+)
+ritual_plan = resolve_ritual_plan(
+    specimen_profile,
+    ritual_chain=(resume_state.get('ritual_chain') if resume_state and not cli_arg_present('--ritual-chain') else args.ritual_chain),
+    mode_override=(resume_state.get('mode') if resume_state and not cli_arg_present('--mode') else args.mode),
+)
+ritual_chain = str(ritual_plan['ritual_chain'])
+
+explicit_options = set()
+for names, key in (
+    (('-l', '--level'), 'depth'),
+    (('-t', '--threads'), 'threads'),
+    (('-d', '--delay'), 'delay'),
+    (('--timeout',), 'timeout'),
+    (('--scope',), 'scope'),
+    (('--keys',), 'extract_secrets'),
+    (('--only-urls',), 'only_urls'),
+    (('--wayback',), 'archive_seeds'),
+    (('--render-js',), 'render_js'),
+    (('--respect-robots-delay',), 'respect_robots_delay'),
+):
+    if cli_arg_present(*names):
+        explicit_options.add(key)
+
+resolved_config = {
+    'depth': args.level,
+    'threads': args.threads,
+    'delay': args.delay,
+    'timeout': args.timeout,
+    'scope': args.scope,
+    'extract_secrets': bool(args.api),
+    'only_urls': bool(args.only_urls),
+    'archive_seeds': bool(args.archive),
+    'render_js': bool(args.render_js),
+    'respect_robots_delay': bool(args.respect_robots_delay),
+}
+for key, value in ritual_plan.get('defaults', {}).items():
+    if key not in explicit_options:
+        resolved_config[key] = value
+resolved_config = apply_preset(
+    resolved_config,
+    (resume_state.get('preset') if resume_state and not cli_arg_present('--preset') else args.preset),
+    explicit_options,
+)
+
+delay = float(resolved_config['delay'])
+timeout = float(resolved_config['timeout'])
+api = bool(resolved_config['extract_secrets'])
+only_urls = bool(resolved_config['only_urls'])
+crawl_level = int(resolved_config['depth'])
+thread_count = int(resolved_config['threads'])
+scope_mode = str(resolved_config['scope'])
+mode = coerce_mode(ritual_plan['mode'])
+preset = coerce_preset(resolved_config.get('preset'))
 document_depth_forced = mode == 'document' and crawl_level < 1
+args.archive = bool(resolved_config.get('archive_seeds'))
+args.render_js = bool(resolved_config.get('render_js'))
+args.respect_robots_delay = bool(resolved_config.get('respect_robots_delay'))
 dataset_names = [
     'files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped',
     'redirects', 'internal', 'scripts', 'external', 'fuzzable',
-    'endpoints', 'keys', *MODE_DATASET_NAMES,
+    'endpoints', 'keys', *MODE_DATASET_NAMES, *ANALYSIS_DATASET_NAMES,
 ]
 
 if mode == 'js-intel':
@@ -193,35 +299,75 @@ if args.proxies:
 else:
     proxies.append(None)
 
+direct_local_html = specimen_profile.get('type') == 'html' and bool(specimen_profile.get('inline_payload'))
+direct_local_js = specimen_profile.get('type') == 'js' and bool(specimen_profile.get('local_path'))
+direct_local_pdf = specimen_profile.get('type') == 'pdf' and bool(specimen_profile.get('local_path'))
+direct_remote_js = specimen_profile.get('type') == 'js' and not bool(specimen_profile.get('local_path'))
+direct_remote_pdf = specimen_profile.get('type') == 'pdf' and not bool(specimen_profile.get('local_path'))
+
 if resume_state:
     main_url = resume_state.get('main_url') or ''
-    requested_root = normalize_url(args.root) if args.root else ''
-    if requested_root and main_url and requested_root != main_url:
+    requested_root = normalize_url(target_input) if target_input and target_input.startswith('http') else ''
+    if requested_root and main_url and requested_root != main_url and not direct_remote_js and not direct_remote_pdf:
         print(f'{coffin}Checkpoint prey mismatch: {requested_root} != {main_url}')
         sys.exit(1)
 else:
-    main_inp = args.root.rstrip('/')
-    if main_inp.startswith('http'):
-        main_url = main_inp
-    else:
-        try:
-            probe_proxy = random.choice(proxies) if proxies else None
-            get_session().get('https://' + main_inp, proxies=probe_proxy, timeout=timeout, verify=False, headers=headers or None)
-            main_url = 'https://' + main_inp
-        except Exception:
-            main_url = 'http://' + main_inp
-    main_url = normalize_url(main_url)
+    main_url = ''
+    specimen_root = ''
+    roots = list(specimen_profile.get('crawl_roots') or ())
+    if specimen_profile.get('type') == 'sitemap' and ritual_plan.get('seed_urls'):
+        specimen_root = ritual_plan['seed_urls'][-1]
+    elif direct_remote_js or direct_remote_pdf:
+        direct_url = roots[0] if roots else ''
+        parsed_direct = urlsplit(direct_url)
+        specimen_root = normalize_url(f'{parsed_direct.scheme}://{parsed_direct.netloc}/') if parsed_direct.scheme and parsed_direct.netloc else ''
+    elif roots:
+        specimen_root = roots[0]
+    if specimen_root:
+        if specimen_root.startswith('http'):
+            main_url = normalize_url(specimen_root)
+        else:
+            try:
+                probe_proxy = random.choice(proxies) if proxies else None
+                get_session().get('https://' + specimen_root, proxies=probe_proxy, timeout=timeout, verify=False, headers=headers or None)
+                main_url = normalize_url('https://' + specimen_root)
+            except Exception:
+                main_url = normalize_url('http://' + specimen_root)
 
-if not main_url:
-    print(f'{coffin}The chosen prey could not be normalized into a crawlable URL.')
-    sys.exit(1)
+if not main_url and not (direct_local_html or direct_local_js or direct_local_pdf):
+    if args.dry_run:
+        main_url = ''
+    else:
+        print(f'{coffin}The chosen specimen was classified as {specimen_profile.get("type")} but could not be normalized into a crawlable URL.')
+        sys.exit(1)
+
+if args.dry_run:
+    print(f'{fang}Dry run — no requests will be made.')
+    print(f'{fang}Specimen type   {specimen_profile.get("type")}')
+    print(f'{fang}Ritual chain    {ritual_chain}')
+    print(f'{fang}Mode            {mode}')
+    print(f'{fang}Preset          {preset}')
+    print(f'{fang}Main root       {main_url or "-"}')
+    print(f'{fang}Seed roots      {", ".join(ritual_plan.get("seed_urls") or []) or "-"}')
+    print(f'{fang}Scope           {scope_mode}')
+    print(f'{fang}Depth           {crawl_level}')
+    print(f'{fang}Threads         {thread_count}')
+    print(f'{fang}Delay           {delay}')
+    print(f'{fang}Timeout         {timeout}')
+    print(f'{fang}Archive seeds   {str(bool(resolved_config.get("archive_seeds"))).lower()}')
+    print(f'{fang}Render JS       {str(bool(resolved_config.get("render_js"))).lower()}')
+    print(f'{fang}Secrets         {str(api).lower()}')
+    if specimen_profile.get('notes'):
+        for note in specimen_profile['notes']:
+            print(f'{crypt}{note}')
+    sys.exit(0)
 
 host = urlparse(main_url).netloc
 try:
     domain = top_level(main_url)
 except Exception:
     domain = host
-output_dir = args.output or (resume_state.get('output_dir') if resume_state else None) or host
+output_dir = args.output or (resume_state.get('output_dir') if resume_state else None) or (host or 'specimen')
 
 if args.user_agent:
     user_agents = [ua.strip() for ua in args.user_agent.split(',') if ua.strip()]
@@ -257,9 +403,13 @@ stories = set()
 hidden_paths = set()
 scam_signals = set()
 temporal_diffs = set()
+site_anatomy = set()
+mutation_probes = set()
 processed = set()
 bad_scripts = set()
 bad_intel = set()
+artifact_genealogy = {}
+content_types = {}
 render_state = {'disabled': False, 'message': None}
 render_lock = threading.Lock()
 
@@ -288,9 +438,13 @@ if resume_state:
     hidden_paths.update(restored['hidden_paths'])
     scam_signals.update(restored['scam_signals'])
     temporal_diffs.update(restored['temporal_diffs'])
+    site_anatomy.update(restored['site_anatomy'])
+    mutation_probes.update(restored['mutation_probes'])
     processed.update(restored['processed'])
     bad_scripts.update(restored['bad_scripts'])
     bad_intel.update(restored['bad_intel'])
+    artifact_genealogy.update(normalize_checkpoint_mapping(resume_state, 'artifact_genealogy'))
+    content_types.update(normalize_checkpoint_mapping(resume_state, 'content_types'))
     stats = CrawlStats.from_snapshot(resume_state.get('stats'))
 
 policy = PolitenessController(
@@ -298,6 +452,16 @@ policy = PolitenessController(
     host_concurrency=args.host_concurrency,
     adaptive_backoff=not args.disable_adaptive_backoff,
 )
+
+
+def note_content_type(raw_content_type):
+    normalized = normalize_content_type(raw_content_type or '')
+    bucket = normalized or 'unknown'
+    content_types[bucket] = int(content_types.get(bucket, 0) or 0) + 1
+
+
+def record_artifact(url, discovered_on=None, source_kind='link', note=None):
+    record_artifact_discovery(artifact_genealogy, url, discovered_on, source_kind, note)
 
 
 def mark_scope(url):
@@ -341,6 +505,7 @@ extractor_context = {
     'custom_regex': args.regex,
     'extract_secrets': api,
     'mode': mode,
+    'record_artifact_discovery': record_artifact,
 }
 
 only_urls_context = dict(extractor_context, custom_regex=None, extract_secrets=False, bad_intel=set(), bad_scripts=set(), forms=set())
@@ -349,6 +514,11 @@ only_urls_context = dict(extractor_context, custom_regex=None, extract_secrets=F
 def checkpoint_payload(stage):
     return {
         'stage': stage,
+        'specimen_input': target_input,
+        'specimen_kind': specimen_kind,
+        'specimen_profile': specimen_profile,
+        'ritual_chain': ritual_chain,
+        'preset': preset,
         'main_url': main_url,
         'host': host,
         'domain': domain,
@@ -356,6 +526,7 @@ def checkpoint_payload(stage):
         'mode': mode,
         'output_dir': output_dir,
         'stats': stats.snapshot(visited=len(processed)),
+        'content_types': content_types,
         'files': sorted(files),
         'forms': sorted(forms),
         'intel': sorted(intel),
@@ -379,6 +550,9 @@ def checkpoint_payload(stage):
         'hidden_paths': sorted(hidden_paths),
         'scam_signals': sorted(scam_signals),
         'temporal_diffs': sorted(temporal_diffs),
+        'site_anatomy': sorted(site_anatomy),
+        'mutation_probes': sorted(mutation_probes),
+        'artifact_genealogy': finalize_genealogy(artifact_genealogy),
         'processed': sorted(processed),
         'bad_scripts': sorted(bad_scripts),
         'bad_intel': [
@@ -397,15 +571,24 @@ def write_checkpoint(stage):
 
 
 def record_request_outcome(url, result, purpose):
+    note_content_type(result.content_type)
     if result.redirected:
         trail = ' -> '.join(
             normalize_url(hop, base_url=main_url) or hop
             for hop in [*result.redirect_chain, result.final_url]
         )
         redirects.add(f'{url} => {trail}')
+        if url in artifact_genealogy:
+            update_artifact_observation(
+                artifact_genealogy,
+                url,
+                redirects=[normalize_url(hop, base_url=main_url) or hop for hop in [*result.redirect_chain, result.final_url]],
+            )
     normalized_final = normalize_url(result.final_url, base_url=main_url)
     if normalized_final and normalized_final != url:
         mark_scope(normalized_final)
+        if url in artifact_genealogy:
+            record_artifact(normalized_final, url, 'redirect-target', 'redirect resolution')
 
     if result.skip_reason:
         skipped.add(f'{purpose}:{url}:{result.skip_reason}')
@@ -478,6 +661,13 @@ def jscanner(url):
     )
     if not record_request_outcome(url, result, 'script'):
         return
+    update_artifact_observation(
+        artifact_genealogy,
+        url,
+        content_type=result.content_type,
+        body=result.text.encode('utf-8', 'ignore'),
+        seen_label='current-run',
+    )
     run_script_extractors(url, result.text, extractor_context)
 
 
@@ -527,6 +717,7 @@ def harvest_documents():
             stats.bump('failures')
             continue
         stats.bump('successes')
+        note_content_type(response.headers.get('Content-Type', ''))
         metadata_records, leak_records = extract_document_records(
             response.url,
             response.content,
@@ -534,6 +725,17 @@ def harvest_documents():
         )
         document_metadata.update(metadata_records)
         document_leaks.update(leak_records)
+        update_artifact_observation(
+            artifact_genealogy,
+            url,
+            content_type=normalize_content_type(response.headers.get('Content-Type', '')),
+            body=response.content,
+            title=next((item.split(' title=', 1)[1] for item in metadata_records if ' title=' in item), ''),
+            metadata=sorted(metadata_records | leak_records),
+            archive_presence=bool(args.archive),
+            redirects=[hop.url for hop in response.history] + [response.url],
+            seen_label='current-run',
+        )
 
 
 def discover_hidden_paths():
@@ -593,7 +795,82 @@ def snapshot_exists(snapshot_dir):
     )
 
 
+def process_inline_specimen():
+    inline_payload = specimen_profile.get('inline_payload') or ''
+    if not inline_payload:
+        return
+    pseudo_url = main_url or 'https://inline.specimen.local/'
+    internal.add(pseudo_url)
+    processed.add(pseudo_url)
+    stats.bump('markup_pages')
+    note_content_type('text/html')
+    run_page_extractors(pseudo_url, inline_payload, only_urls_context if only_urls else extractor_context)
+
+
+def process_local_script_specimen():
+    local_path = specimen_profile.get('local_path') or ''
+    if not local_path:
+        return
+    script_url = f'file://{os.path.abspath(local_path)}'
+    scripts.add(script_url)
+    processed.add(script_url)
+    record_artifact(script_url, 'local-file', 'local-script', 'local JS specimen')
+    try:
+        with open(local_path, 'r', encoding='utf-8') as handle:
+            payload = handle.read()
+    except OSError as exc:
+        failed.add(script_url)
+        stats.bump('failures')
+        print(f'{coffin}Could not read local script specimen: {exc}')
+        return
+    stats.bump('script_pages')
+    note_content_type('application/javascript')
+    update_artifact_observation(
+        artifact_genealogy,
+        script_url,
+        content_type='application/javascript',
+        body=payload.encode('utf-8', 'ignore'),
+        seen_label='current-run',
+    )
+    run_script_extractors(script_url, payload, extractor_context)
+
+
+def process_local_document_specimen():
+    local_path = specimen_profile.get('local_path') or ''
+    if not local_path:
+        return
+    document_url = f'file://{os.path.abspath(local_path)}'
+    files.add(document_url)
+    processed.add(document_url)
+    record_artifact(document_url, 'local-file', 'local-document', 'local PDF specimen')
+    try:
+        with open(local_path, 'rb') as handle:
+            payload = handle.read()
+    except OSError as exc:
+        failed.add(document_url)
+        stats.bump('failures')
+        print(f'{coffin}Could not read local document specimen: {exc}')
+        return
+    note_content_type('application/pdf')
+    metadata_records, leak_records = extract_document_records(document_url, payload, 'application/pdf')
+    document_metadata.update(metadata_records)
+    document_leaks.update(leak_records)
+    update_artifact_observation(
+        artifact_genealogy,
+        document_url,
+        content_type='application/pdf',
+        body=payload,
+        title=next((item.split(' title=', 1)[1] for item in metadata_records if ' title=' in item), ''),
+        metadata=sorted(metadata_records | leak_records),
+        archive_presence=False,
+        seen_label='current-run',
+    )
+
+
 print(f'{fang}Target locked: {bold}{main_url}{end}')
+print(f'{fang}Specimen       {specimen_profile.get("type")} ({specimen_profile.get("source")})')
+print(f'{fang}Ritual chain   {ritual_chain}')
+print(f'{fang}Preset         {preset}')
 if resume_state:
     print(f'{fang}Rising from checkpoint: {bold}{args.resume}{end}')
 print(f'{fang}The hunt begins… depth={crawl_level}, threads={thread_count}, delay={delay}s, scope={scope_mode}, mode={mode}')
@@ -603,11 +880,14 @@ print(f'{dark_red}{"─" * 60}{end}')
 then = time.time()
 
 if not resume_state:
-    metadata = zap(main_url, args.archive, domain, host, internal, robots, proxies, headers)
-    if args.respect_robots_delay and metadata.get('crawl_delay') is not None:
-        policy.update_robots_delay(metadata['crawl_delay'])
+    metadata = {'crawl_delay': None}
+    if main_url:
+        metadata = zap(main_url, args.archive, domain, host, internal, robots, proxies, headers)
+        if args.respect_robots_delay and metadata.get('crawl_delay') is not None:
+            policy.update_robots_delay(metadata['crawl_delay'])
     seeded = set()
-    for seed in list(internal) + args.seeds + [main_url]:
+    extra_ritual_seeds = [seed for seed in ritual_plan.get('seed_urls', []) if seed and seed != main_url]
+    for seed in list(internal) + extra_ritual_seeds + args.seeds + ([main_url] if main_url else []):
         normalized_seed = normalize_url(seed, base_url=main_url)
         if not normalized_seed:
             continue
@@ -617,6 +897,20 @@ if not resume_state:
             external.add(normalized_seed)
     internal.clear()
     internal.update(remove_regex(seeded, args.exclude))
+    if direct_remote_js:
+        direct_script_url = specimen_profile['crawl_roots'][0]
+        scripts.add(direct_script_url)
+        record_artifact(direct_script_url, main_url or direct_script_url, 'direct-script-specimen', 'remote JS specimen')
+    if direct_remote_pdf:
+        direct_document_url = specimen_profile['crawl_roots'][0]
+        files.add(direct_document_url)
+        record_artifact(direct_document_url, main_url or direct_document_url, 'direct-document-specimen', 'remote PDF specimen')
+    if direct_local_html:
+        process_inline_specimen()
+    if direct_local_js:
+        process_local_script_specimen()
+    if direct_local_pdf:
+        process_local_document_specimen()
     write_checkpoint('seeded')
 elif args.respect_robots_delay:
     metadata = zap(main_url, False, domain, host, set(), set(), proxies, headers)
@@ -645,6 +939,7 @@ if not only_urls:
             continue
         if is_in_scope(normalized_script, host, domain, scope_mode, scope_allow, scope_deny):
             scripts.add(normalized_script)
+            record_artifact(normalized_script, main_url, 'script-queue', 'queued for js archaeology')
         else:
             external.add(normalized_script)
 
@@ -699,6 +994,7 @@ if mode == 'temporal':
 datasets = [
     files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
     document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
+    site_anatomy, mutation_probes, set(),
 ]
 if mode == 'temporal' and previous_snapshot:
     current_snapshot = {
@@ -709,27 +1005,6 @@ if mode == 'temporal' and previous_snapshot:
     temporal_diffs.update(build_temporal_diffs(previous_snapshot, current_snapshot))
 elif mode == 'temporal':
     temporal_diffs.add('dataset=temporal_diffs change=baseline-missing value=No prior snapshot found')
-writer(datasets, dataset_names, output_dir)
-
-visited_count = len(processed)
-stats_summary = stats.snapshot(visited=visited_count)
-writer([[
-    f'{name}={value}' for name, value in sorted(stats_summary.items())
-]], ['stats'], output_dir)
-
-print(f'\n{dark_red}{"─" * 60}{end}')
-print(f'{blood}Harvest summary{end}')
-for dataset, name in zip(datasets, dataset_names):
-    if dataset:
-        print(f'{fang}{name.capitalize():<14} {len(dataset)}')
-print(f'{dark_red}{"─" * 60}{end}')
-print(f'{fang}Visited         {visited_count}')
-print(f'{fang}Time elapsed    {minutes}m {seconds}s')
-if diff > 0:
-    print(f'{fang}Req/sec         {int(visited_count / diff)}')
-print(f'{fang}Redirects       {stats_summary["redirects"]}')
-print(f'{fang}Skipped         {stats_summary["skipped"]}')
-print(f'{fang}Failures        {stats_summary["failures"]}')
 
 datasets_dict = {
     'files': sorted(files),
@@ -755,8 +1030,50 @@ datasets_dict = {
     'hidden_paths': sorted(hidden_paths),
     'scam_signals': sorted(scam_signals),
     'temporal_diffs': sorted(temporal_diffs),
-    'stats': stats_summary,
 }
+site_anatomy_map = build_site_anatomy(main_url or 'https://inline.specimen.local/', datasets_dict, artifact_genealogy, specimen_profile)
+site_anatomy.update(anatomy_lines(site_anatomy_map))
+mutation_probe_records = build_mutation_probes(main_url or 'https://inline.specimen.local/', datasets_dict)
+mutation_probes.update(mutation_lines(mutation_probe_records))
+artifact_genealogy_lines = set(genealogy_lines(artifact_genealogy))
+
+datasets = [
+    files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
+    document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
+    site_anatomy, mutation_probes, artifact_genealogy_lines,
+]
+writer(datasets, dataset_names, output_dir)
+
+visited_count = len(processed)
+stats_summary = stats.snapshot(visited=visited_count)
+writer([[
+    f'{name}={value}' for name, value in sorted(stats_summary.items())
+]], ['stats'], output_dir)
+
+datasets_dict['site_anatomy'] = sorted(site_anatomy)
+datasets_dict['mutation_probes'] = sorted(mutation_probes)
+datasets_dict['artifact_genealogy'] = sorted(artifact_genealogy_lines)
+datasets_dict['stats'] = stats_summary
+
+print(f'\n{dark_red}{"─" * 60}{end}')
+print(f'{blood}Harvest summary{end}')
+for dataset, name in zip(datasets, dataset_names):
+    if dataset:
+        print(f'{fang}{name.capitalize():<14} {len(dataset)}')
+print(f'{dark_red}{"─" * 60}{end}')
+top_content_types = sorted(content_types.items(), key=lambda item: (-item[1], item[0]))[:5]
+print(f'{fang}Visited         {visited_count}')
+print(f'{fang}Specimen        {specimen_profile.get("type")}')
+print(f'{fang}Ritual chain    {ritual_chain}')
+print(f'{fang}Preset          {preset}')
+print(f'{fang}Time elapsed    {minutes}m {seconds}s')
+if diff > 0:
+    print(f'{fang}Req/sec         {int(visited_count / diff)}')
+print(f'{fang}Redirects       {stats_summary["redirects"]}')
+print(f'{fang}Skipped         {stats_summary["skipped"]}')
+print(f'{fang}Failures        {stats_summary["failures"]}')
+print(f'{fang}Exported        {len(dataset_names) + 3}')
+print(f'{fang}Top types       {", ".join(f"{name}:{count}" for name, count in top_content_types) or "-"}')
 
 if args.dns:
     print(f'{fang}Seeking bloodlines (subdomains)…')
@@ -782,6 +1099,24 @@ if args.dns:
 if args.export:
     from plugins.exporter import exporter
     exporter(output_dir, args.export, datasets_dict)
+
+autopsy = build_autopsy(
+    specimen=specimen_profile,
+    ritual=ritual_plan,
+    preset=preset,
+    mode=mode,
+    datasets=datasets_dict,
+    stats=stats_summary,
+    genealogy=artifact_genealogy,
+    anatomy=site_anatomy_map,
+    mutation_probes=mutation_probe_records,
+    exports=['autopsy.json', 'autopsy.md', 'stats.txt', *([f'results.{args.export}'] if args.export else [])],
+    duration_seconds=diff,
+    content_types=content_types,
+)
+autopsy_json_path, autopsy_md_path = write_autopsy_files(output_dir, autopsy)
+print(f'{fang}Autopsy JSON    {autopsy_json_path}')
+print(f'{fang}Autopsy MD      {autopsy_md_path}')
 
 write_checkpoint('complete')
 print(f'\n{blood}The harvest is complete. Loot interred in {bold}{green}{output_dir}{end}')

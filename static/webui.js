@@ -4,59 +4,67 @@ const state = {
   lastFeedKey: '',
 };
 
+const PRESET_CONFIG = {
+  balanced: 'Sensible defaults for most hunts.',
+  quick: 'Fast first pass with shallow depth and low ceremony.',
+  polite: 'Lower concurrency and longer delays for fragile targets.',
+  'document-heavy': 'Bias toward linked document harvesting and archive context.',
+  'javascript-heavy': 'Bias toward rendering and script archaeology.',
+};
+
 const MODE_CONFIG = {
   generic: {
     label: 'GENERIC HUNT',
     description: 'Balanced reconnaissance across pages, forms, scripts, and relics.',
-    flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns'],
+    flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns', 'dry'],
     force: {},
   },
   document: {
     label: 'DOCUMENT HARVESTER',
     description: 'Exhume PDF and office tombs for metadata, authors, internal paths, and mail leaks.',
-    flags: ['scope', 'intel', 'robots', 'archive'],
+    flags: ['scope', 'intel', 'robots', 'archive', 'dry'],
     force: { render: false },
   },
   'js-intel': {
     label: 'JS INTELLIGENCE',
     description: 'Read occult JavaScript sigils for hidden routes, tokens, feature flags, and config relics.',
-    flags: ['scope', 'secrets', 'robots', 'render', 'archive'],
+    flags: ['scope', 'secrets', 'robots', 'render', 'archive', 'dry'],
     force: { secrets: true },
   },
   forum: {
     label: 'THREAD NECROMANCY',
     description: 'Reanimate conversations through replies, quotes, and deleted-user shadows.',
-    flags: ['scope', 'intel', 'robots', 'render'],
+    flags: ['scope', 'intel', 'robots', 'render', 'dry'],
     force: {},
   },
   geo: {
     label: 'GEO-INTELLIGENCE',
     description: 'Collect coordinates, place names, and geo tags into map-ready blood trails.',
-    flags: ['scope', 'intel', 'robots', 'render'],
+    flags: ['scope', 'intel', 'robots', 'render', 'dry'],
     force: {},
   },
   news: {
     label: 'NEWS PROPAGATION',
     description: 'Follow one story through outlets, tongues, regions, and mutations.',
-    flags: ['scope', 'robots', 'render', 'archive'],
+    flags: ['scope', 'robots', 'render', 'archive', 'dry'],
     force: {},
   },
   hidden: {
     label: 'SHADOW GATE HUNT',
     description: 'Blend learned paths with a bounded wordlist to find sealed routes and hidden doors.',
-    flags: ['scope', 'robots', 'archive'],
+    flags: ['scope', 'robots', 'archive', 'dry'],
     force: {},
   },
   scam: {
     label: 'SCAM / DARK PATTERN',
     description: 'Flag fake urgency, coercive funnels, cloned trust marks, and cursed checkout flows.',
-    flags: ['scope', 'intel', 'robots', 'render'],
+    flags: ['scope', 'intel', 'robots', 'render', 'dry'],
     force: {},
   },
   temporal: {
     label: 'TEMPORAL CHANGE',
     description: 'Compare the current harvest against an older night and mark what shifted in silence.',
-    flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns'],
+    flags: ['scope', 'intel', 'secrets', 'robots', 'render', 'archive', 'dns', 'dry'],
     force: {},
   },
 };
@@ -65,6 +73,9 @@ const els = {
   app: document.getElementById('app'),
   form: document.getElementById('crawlForm'),
   targetUrl: document.getElementById('targetUrl'),
+  ritualChain: document.getElementById('ritualChain'),
+  crawlPreset: document.getElementById('crawlPreset'),
+  inputKind: document.getElementById('inputKind'),
   crawlMode: document.getElementById('crawlMode'),
   depth: document.getElementById('depth'),
   threads: document.getElementById('threads'),
@@ -77,6 +88,7 @@ const els = {
   renderJs: document.getElementById('renderJs'),
   archiveSeeds: document.getElementById('archiveSeeds'),
   dns: document.getElementById('dns'),
+  dryRun: document.getElementById('dryRun'),
   beginButton: document.getElementById('beginButton'),
   pauseButton: document.getElementById('pauseButton'),
   stopButton: document.getElementById('stopButton'),
@@ -91,6 +103,8 @@ const els = {
   recordPath: document.getElementById('recordPath'),
   sealedRecords: document.getElementById('sealedRecords'),
   modeHint: document.getElementById('modeHint'),
+  configPreview: document.getElementById('configPreview'),
+  resultSearch: document.getElementById('resultSearch'),
 };
 
 function escapeHtml(value) {
@@ -104,7 +118,11 @@ function escapeHtml(value) {
 
 function formPayload() {
   return {
+    target_specimen: els.targetUrl.value.trim(),
     target_url: els.targetUrl.value.trim(),
+    ritual_chain: els.ritualChain.value || undefined,
+    preset: els.crawlPreset.value,
+    input_kind: els.inputKind.value,
     mode: els.crawlMode.value,
     depth: Number(els.depth.value || 2),
     threads: Number(els.threads.value || 4),
@@ -117,18 +135,29 @@ function formPayload() {
     render_js: els.renderJs.checked,
     archive_seeds: els.archiveSeeds.checked,
     enumerate_subdomains: els.dns.checked,
+    dry_run: els.dryRun.checked,
   };
 }
 
-function renderCommandPreview() {
+async function renderCommandPreview() {
   const payload = formPayload();
-  let preview = `> CRAWL ${payload.target_url || 'https://example.com'} --depth ${payload.depth}`;
-  if (payload.mode !== 'generic') preview += ` --mode ${payload.mode}`;
-  if (payload.scope === 'domain') preview += ' --scope domain';
-  if (payload.render_js) preview += ' --render-js';
-  if (payload.archive_seeds) preview += ' --wayback';
-  if (payload.enumerate_subdomains) preview += ' --dns';
-  els.commandPreview.textContent = preview;
+  try {
+    const preview = await postJson('/api/preview', payload);
+    els.commandPreview.textContent = `> ${preview.command_preview}`;
+    const resolved = preview.resolved || {};
+    els.configPreview.textContent = [
+      `Specimen: ${resolved.specimen?.type || 'auto'}`,
+      `Ritual: ${resolved.ritual_chain || 'domain_necropsy'}`,
+      `Mode: ${resolved.mode || 'generic'}`,
+      `Preset: ${resolved.preset || 'balanced'} // ${PRESET_CONFIG[resolved.preset || 'balanced'] || ''}`,
+      `Target URL: ${resolved.target_url || '-'}`,
+      `Depth=${resolved.depth} Threads=${resolved.threads} Delay=${resolved.delay} Timeout=${resolved.timeout}`,
+      `Flags: scope=${resolved.scope} render=${resolved.render_js} archive=${resolved.archive_seeds} dns=${resolved.enumerate_subdomains} dry=${resolved.dry_run}`,
+    ].join('\n');
+  } catch (error) {
+    els.commandPreview.textContent = `> CRAWL ${payload.target_specimen || 'https://example.com'} --depth ${payload.depth}`;
+    els.configPreview.textContent = String(error.message || error);
+  }
 }
 
 function syncModeControls() {
@@ -193,6 +222,7 @@ function renderPanels(data) {
     </section>
   `).join('');
   attachDecryptHover();
+  applyResultFilter();
 }
 
 function renderExports(data) {
@@ -213,6 +243,7 @@ function renderRecords(data) {
       <div class="record-card">
         <div class="panel-title">${escapeHtml(record.status_message || record.status)}</div>
         <strong>${escapeHtml(record.target_url || record.id)}</strong>
+        <div>${escapeHtml(record.mode || 'generic')} // ${escapeHtml(record.status || '')}</div>
         <div>${escapeHtml(record.ended_at || '')}</div>
       </div>
     `).join('')
@@ -264,8 +295,8 @@ async function refreshState() {
 
 async function beginCrawl() {
   const payload = formPayload();
-  if (!payload.target_url) {
-    els.errorConsole.textContent = 'TARGET URL is required.';
+  if (!payload.target_specimen) {
+    els.errorConsole.textContent = 'TARGET SPECIMEN is required.';
     els.targetUrl.focus();
     return;
   }
@@ -324,6 +355,19 @@ function attachDecryptHover() {
   });
 }
 
+function applyResultFilter() {
+  const query = (els.resultSearch?.value || '').trim().toLowerCase();
+  document.querySelectorAll('.result-item').forEach((node) => {
+    const visible = !query || node.textContent.toLowerCase().includes(query);
+    node.style.display = visible ? '' : 'none';
+  });
+  document.querySelectorAll('#resultPanels .terminal-panel').forEach((panel) => {
+    const anyVisible = Array.from(panel.querySelectorAll('.result-item')).some((item) => item.style.display !== 'none');
+    const hasEmpty = panel.querySelector('.empty-note');
+    panel.style.display = (anyVisible || hasEmpty || !query) ? '' : 'none';
+  });
+}
+
 ['input', 'change'].forEach((eventName) => {
   els.form.addEventListener(eventName, renderCommandPreview);
 });
@@ -338,6 +382,7 @@ els.form.addEventListener('keydown', (event) => {
   beginCrawl();
 });
 els.crawlMode.addEventListener('change', syncModeControls);
+els.resultSearch.addEventListener('input', applyResultFilter);
 
 els.beginButton.addEventListener('click', beginCrawl);
 els.pauseButton.addEventListener('click', togglePause);

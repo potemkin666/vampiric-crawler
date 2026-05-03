@@ -13,7 +13,8 @@ CHECKPOINT_VERSION = 1
 DATASET_NAMES = (
     'files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped',
     'redirects', 'internal', 'scripts', 'external', 'fuzzable',
-    'endpoints', 'keys', *MODE_DATASET_NAMES, 'processed', 'bad_scripts', 'bad_intel',
+    'endpoints', 'keys', *MODE_DATASET_NAMES, 'site_anatomy', 'mutation_probes',
+    'processed', 'bad_scripts', 'bad_intel',
 )
 
 
@@ -66,3 +67,9 @@ def normalize_checkpoint_sets(payload):
         else:
             restored[name] = set(values or [])
     return restored
+
+
+def normalize_checkpoint_mapping(payload, name):
+    """Return a dict field from a checkpoint payload."""
+    value = payload.get(name, {})
+    return value if isinstance(value, dict) else {}
