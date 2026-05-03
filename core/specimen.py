@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -37,13 +38,14 @@ SPECIMEN_TO_RITUAL = {
     'company': 'scam_smell_test',
     'handle': 'scam_smell_test',
 }
+ALLOWED_LOCAL_SUFFIXES = frozenset(('.js', '.mjs', '.cjs', '.pdf', '.html', '.htm'))
 
 
 def classify_specimen(raw_value: str | None, explicit_kind: str | None = None) -> dict[str, object]:
     """Return a normalized specimen profile."""
     raw = (raw_value or '').strip()
     explicit = (explicit_kind or 'auto').strip().lower()
-    local_path = raw if raw and os.path.isfile(raw) else ''
+    local_path = _normalize_local_path(raw)
     specimen_type = _classify_type(raw, explicit, local_path)
     canonical_target = raw
     crawl_roots: list[str] = []
@@ -160,7 +162,8 @@ def setup_status() -> dict[str, object]:
         from playwright.sync_api import sync_playwright
         manager = sync_playwright().start()
         try:
-            manager.chromium.launch(headless=True).close()
+            browser_instance = manager.chromium.launch(headless=True)
+            browser_instance.close()
             browser = 'ok'
         finally:
             manager.stop()
@@ -236,11 +239,29 @@ def _classification_confidence(specimen_type: str, raw: str, explicit: str) -> f
 
 
 def _read_text_file(path: str) -> str:
+    normalized_path = _normalize_local_path(path)
+    if not normalized_path:
+        return ''
     try:
-        with open(path, 'r', encoding='utf-8') as handle:
+        with open(normalized_path, 'r', encoding='utf-8') as handle:
             return handle.read()
     except OSError:
         return ''
+
+
+def _normalize_local_path(raw: str) -> str:
+    if not raw:
+        return ''
+    try:
+        path = Path(raw).expanduser()
+        if path.suffix.lower() not in ALLOWED_LOCAL_SUFFIXES:
+            return ''
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return ''
+    if not resolved.is_file():
+        return ''
+    return str(resolved)
 
 
 def _ritual_seed_urls(specimen: dict[str, object]) -> list[str]:
