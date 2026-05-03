@@ -164,7 +164,7 @@ async function renderCommandPreview() {
     ].join('\n');
   } catch (error) {
     els.commandPreview.textContent = `> CRAWL ${payload.target_specimen || 'https://example.com'} --depth ${payload.depth}`;
-    els.configPreview.textContent = String(error.message || error);
+    els.configPreview.textContent = `Failed to load preview: ${String(error.message || error)}`;
   }
 }
 
