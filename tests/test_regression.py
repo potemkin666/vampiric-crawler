@@ -11,6 +11,8 @@ from socketserver import ThreadingMixIn
 from core.utils import extract_headers
 from plugins.exporter import exporter
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -104,11 +106,10 @@ class RegressionTests(unittest.TestCase):
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
-                repo = '/home/runner/work/vampiric-crawler/vampiric-crawler'
                 output_dir = os.path.join(tmpdir, 'loot')
                 command = [
                     sys.executable,
-                    os.path.join(repo, 'vampire.py'),
+                    os.path.join(REPO_ROOT, 'vampire.py'),
                     '-u', server.base_url,
                     '-l', '2',
                     '-t', '2',
@@ -120,7 +121,7 @@ class RegressionTests(unittest.TestCase):
                 ]
                 result = subprocess.run(
                     command,
-                    cwd=repo,
+                    cwd=REPO_ROOT,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,

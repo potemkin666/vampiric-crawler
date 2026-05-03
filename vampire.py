@@ -197,7 +197,8 @@ if main_inp.startswith('http'):
     main_url = main_inp
 else:
     try:
-        get_session().get('https://' + main_inp, proxies=random.choice(proxies),
+        probe_proxy = random.choice(proxies) if proxies else None
+        get_session().get('https://' + main_inp, proxies=probe_proxy,
                           timeout=timeout, verify=False, headers=headers or None)
         main_url = 'https://' + main_inp
     except Exception:
@@ -466,11 +467,12 @@ dataset_names = ['files', 'intel', 'robots', 'custom', 'failed', 'skipped',
 
 writer(datasets, dataset_names, output_dir)
 
+# Ignore the sentinel value seeded into *processed* at startup.
 visited_count = len(processed) - 1
 stats_summary = stats.snapshot(visited=visited_count)
-writer([{
+writer([[
     f'{name}={value}' for name, value in sorted(stats_summary.items())
-}], ['stats'], output_dir)
+]], ['stats'], output_dir)
 
 # ── Print summary ──────────────────────────────────────────────────────────────
 print(f'\n{dark_red}{"─" * 60}{end}')

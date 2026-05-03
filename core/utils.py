@@ -239,7 +239,7 @@ def should_extract_markup(content_type):
     """Return True if *content_type* should be parsed like a page."""
     if not content_type:
         return True
-    if content_type.startswith(_MARKUP_CONTENT_TYPES):
+    if content_type in _MARKUP_CONTENT_TYPES:
         return True
     return content_type.startswith('text/')
 
