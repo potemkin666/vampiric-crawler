@@ -411,7 +411,7 @@ function renderResultLedger(data) {
                 : '-'
             }</div></div>
             <div><strong>EXPORTS</strong><div class="result-link-list">${
-              ['json', 'csv', 'manifest-json']
+              (row.export_kinds || [])
                 .filter((kind) => exportLinks.has(kind))
                 .map((kind) => `<a class="result-link" href="${escapeHtml(exportLinks.get(kind) || '#')}">${escapeHtml(kind)}</a>`)
                 .join(' ') || `<a class="result-link" href="#exportPanel">sealed exports</a>`

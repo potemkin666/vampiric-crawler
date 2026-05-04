@@ -225,9 +225,10 @@ def setup_status(output_dir: str | None = None, proxy: object | None = None) -> 
 def _coerce_output_dir_for_check(output_dir: str | None) -> Path:
     if not output_dir:
         return Path.cwd()
-    candidate = str(output_dir).strip()
-    if '\x00' in candidate:
+    raw_candidate = str(output_dir)
+    if '\x00' in raw_candidate:
         raise ValueError('Output directory contains an invalid null byte.')
+    candidate = raw_candidate.strip()
     return Path(candidate).expanduser().resolve(strict=False)
 
 

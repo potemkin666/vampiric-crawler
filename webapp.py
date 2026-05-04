@@ -142,7 +142,12 @@ def parse_redirects(items: list[str]) -> dict[str, list[str]]:
         source, _, trail = item.partition(' => ')
         if not source or not trail:
             continue
-        mapping[source] = [part.strip() for part in trail.split(' -> ') if part.strip()]
+        chain = []
+        for part in trail.split(' -> '):
+            cleaned = part.strip()
+            if cleaned:
+                chain.append(cleaned)
+        mapping[source] = chain
     return mapping
 
 
@@ -784,12 +789,12 @@ def ensure_exports(run: CrawlRun) -> None:
 def build_setup_diagnostics(output_dir: Path, proxy: str | None = None) -> dict[str, Any]:
     status = setup_status(output_dir=str(output_dir), proxy=proxy)
     checks = [
-        {'name': f'package:{name}', 'status': value, 'detail': value}
+        {'name': f'package:{name}', 'status': _public_check_status(value), 'detail': _public_check_detail(value)}
         for name, value in sorted(status['packages'].items())
     ]
     checks.extend([
-        {'name': 'playwright-browser', 'status': status['playwright_browser'], 'detail': status['playwright_browser']},
-        {'name': 'render-smoke', 'status': status['render_smoke'], 'detail': status['render_smoke']},
+        {'name': 'playwright-browser', 'status': _public_check_status(status['playwright_browser']), 'detail': _public_check_detail(status['playwright_browser'])},
+        {'name': 'render-smoke', 'status': _public_check_status(status['render_smoke']), 'detail': _public_check_detail(status['render_smoke'])},
         {'name': 'output-dir', 'status': status['output_dir']['status'], 'detail': status['output_dir']['path']},
         {'name': 'proxy-sanity', 'status': status['proxy']['status'], 'detail': status['proxy']['detail']},
     ])
@@ -800,6 +805,14 @@ def build_setup_diagnostics(output_dir: Path, proxy: str | None = None) -> dict[
         'overall_status': 'ok' if not issues else 'issues',
         'status_message': 'FIRST-RUN DIAGNOSTICS CLEAR' if not issues else 'FIRST-RUN DIAGNOSTICS FOUND ISSUES',
     }
+
+
+def _public_check_status(value: str) -> str:
+    return 'ok' if str(value) == 'ok' else 'missing'
+
+
+def _public_check_detail(value: str) -> str:
+    return 'Dependency ready.' if str(value) == 'ok' else 'Review setup-check output in the CLI for exact remediation.'
 
 
 class CrawlManager:
