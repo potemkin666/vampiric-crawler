@@ -4,7 +4,13 @@ const state = {
   viewRunId: null,
   lastFeedKey: '',
   sortKey: 'discovery_time',
+  sortDirection: 'desc',
   lastState: null,
+  busyActions: {
+    crawl: false,
+    pause: false,
+    stop: false,
+  },
 };
 
 const PRESET_CONFIG = {
@@ -124,11 +130,14 @@ const els = {
   robotsPanel: document.getElementById('robotsPanel'),
   sitemapPanel: document.getElementById('sitemapPanel'),
   resultSort: document.getElementById('resultSort'),
+  resultSortDirection: document.getElementById('resultSortDirection'),
   resultStateFilter: document.getElementById('resultStateFilter'),
+  resultStatusBucketFilter: document.getElementById('resultStatusBucketFilter'),
   resultErrorFilter: document.getElementById('resultErrorFilter'),
   resultTypeFilter: document.getElementById('resultTypeFilter'),
   resultSourceFilter: document.getElementById('resultSourceFilter'),
   resultLedger: document.getElementById('resultLedger'),
+  resultFilterSummary: document.getElementById('resultFilterSummary'),
 };
 
 function escapeHtml(value) {
@@ -138,6 +147,63 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function highlightText(value, query) {
+  const text = String(value || '');
+  if (!query) return escapeHtml(text);
+  const matcher = new RegExp(`(${escapeRegExp(query)})`, 'ig');
+  return escapeHtml(text).replace(matcher, '<mark>$1</mark>');
+}
+
+function statusBucketForRow(row) {
+  const statusCode = Number(row?.status_code || 0);
+  if (row?.error_kind === 'blocked' || [401, 403, 429].includes(statusCode)) return 'blocked';
+  if (statusCode >= 200 && statusCode < 300) return '2xx';
+  if (statusCode >= 300 && statusCode < 400) return '3xx';
+  if (statusCode >= 400 && statusCode < 500) return '4xx';
+  if (statusCode >= 500 && statusCode < 600) return '5xx';
+  if (row?.state === 'failed') return 'failed';
+  if (row?.state === 'skipped') return 'skipped';
+  return 'other';
+}
+
+function setActionBusy(action, isBusy) {
+  const mapping = {
+    crawl: els.beginButton,
+    pause: els.pauseButton,
+    stop: els.stopButton,
+  };
+  state.busyActions[action] = isBusy;
+  const button = mapping[action];
+  if (!button) return;
+  button.classList.toggle('is-busy', isBusy);
+  button.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+  updateActionButtons(state.lastState || { status: state.status });
+}
+
+function updateActionButtons(data) {
+  const status = data?.status || state.status || 'idle';
+  const canPause = Boolean(data?.can_pause);
+  const canStop = Boolean(data?.can_stop);
+  const canResume = Boolean(data?.can_resume);
+  els.beginButton.disabled = state.busyActions.crawl || status === 'running' || status === 'paused' || status === 'stopping';
+  els.pauseButton.disabled = state.busyActions.pause || !(canPause || canResume);
+  els.stopButton.disabled = state.busyActions.stop || !canStop;
+}
+
+async function withActionLock(action, callback) {
+  if (state.busyActions[action]) return null;
+  setActionBusy(action, true);
+  try {
+    return await callback();
+  } finally {
+    setActionBusy(action, false);
+  }
 }
 
 function formPayload() {
@@ -301,16 +367,18 @@ function renderSetupDiagnostics(data) {
 function renderPanels(data) {
   const panels = data.panels || [];
   els.resultPanels.innerHTML = panels.map((panel) => `
-    <section class="terminal-panel" id="panel-${escapeHtml(panel.key || 'panel')}">
+    <section class="terminal-panel" id="panel-${escapeHtml(panel.key || 'panel')}" data-collapsible="mobile" data-collapsed-default="true">
       <div class="panel-title">${escapeHtml(panel.title)} // ${escapeHtml(panel.count)}</div>
       <div class="result-list">
         ${(panel.items && panel.items.length)
-          ? panel.items.map((item) => `<div class="result-item" data-decrypt>${escapeHtml(item)}</div>`).join('')
+          ? panel.items.map((item) => `<div class="result-item" data-decrypt data-source-text="${escapeHtml(item)}">${escapeHtml(item)}</div>`).join('')
           : '<span class="empty-note">THE ARCHIVE IS SILENT</span>'}
       </div>
+      <div class="panel-match-state">Showing all panel items.</div>
     </section>
   `).join('');
   attachDecryptHover();
+  initializeCollapsiblePanels();
   applyResultFilter();
 }
 
@@ -419,19 +487,21 @@ function renderSitemaps(data) {
 
 function sortedResultRows(rows) {
   const sortKey = state.sortKey || 'discovery_time';
+  const direction = state.sortDirection === 'asc' ? 1 : -1;
   return [...(rows || [])].sort((left, right) => {
     const a = left?.[sortKey];
     const b = right?.[sortKey];
     if (sortKey === 'status_code' || sortKey === 'depth' || sortKey === 'discovery_time') {
-      return (Number(a || 0) - Number(b || 0)) || String(left.url || '').localeCompare(String(right.url || ''));
+      return (((Number(a || 0) - Number(b || 0)) || String(left.url || '').localeCompare(String(right.url || ''))) * direction);
     }
-    return String(a || '').localeCompare(String(b || '')) || String(left.url || '').localeCompare(String(right.url || ''));
+    return ((String(a || '').localeCompare(String(b || '')) || String(left.url || '').localeCompare(String(right.url || ''))) * direction);
   });
 }
 
 function populateLedgerFilterOptions(rows) {
   const filters = [
     { node: els.resultStateFilter, values: rows.map((row) => row.state).filter(Boolean), fallback: 'ALL STATES' },
+    { node: els.resultStatusBucketFilter, values: rows.map((row) => statusBucketForRow(row)).filter(Boolean), fallback: 'ALL BUCKETS' },
     { node: els.resultErrorFilter, values: rows.map((row) => row.error_kind).filter(Boolean), fallback: 'ALL ERRORS' },
     { node: els.resultTypeFilter, values: rows.map((row) => row.content_type).filter(Boolean), fallback: 'ALL TYPES' },
     { node: els.resultSourceFilter, values: rows.map((row) => row.source_kind).filter(Boolean), fallback: 'ALL SOURCES' },
@@ -450,6 +520,7 @@ function filteredResultRows(rows) {
   const query = (els.resultSearch?.value || '').trim().toLowerCase();
   return sortedResultRows(rows).filter((row) => {
     if (els.resultStateFilter.value && row.state !== els.resultStateFilter.value) return false;
+    if (els.resultStatusBucketFilter.value && statusBucketForRow(row) !== els.resultStatusBucketFilter.value) return false;
     if (els.resultErrorFilter.value && row.error_kind !== els.resultErrorFilter.value) return false;
     if (els.resultTypeFilter.value && row.content_type !== els.resultTypeFilter.value) return false;
     if (els.resultSourceFilter.value && row.source_kind !== els.resultSourceFilter.value) return false;
@@ -463,22 +534,36 @@ function renderResultLedger(data) {
   populateLedgerFilterOptions(allRows);
   const rows = filteredResultRows(allRows);
   const exportLinks = new Map((data.exports || []).map((item) => [item.kind, item.href]));
+  const query = (els.resultSearch?.value || '').trim();
+  els.resultFilterSummary.textContent = rows.length
+    ? `Showing ${rows.length} of ${allRows.length} result rows${query ? ` matching "${query}"` : '.'}`
+    : `0 matches out of ${allRows.length} result rows${query ? ` for "${query}"` : '.'}`;
   els.resultLedger.innerHTML = rows.length
     ? rows.map((row) => `
       <article class="result-row" data-result-row>
-        <strong>${escapeHtml(row.url || '-')}</strong>
+        <div class="result-row-header">
+          <strong>${highlightText(row.url || '-', query)}</strong>
+          <span class="panel-title">bucket=${escapeHtml(statusBucketForRow(row))}</span>
+        </div>
         <div class="result-meta">
-          <span>state=${escapeHtml(row.state || '-')}</span>
+          <span>state=${highlightText(row.state || '-', query)}</span>
           <span>status=${escapeHtml(row.status_code ?? '-')}</span>
-          <span>type=${escapeHtml(row.content_type || '-')}</span>
+          <span>type=${highlightText(row.content_type || '-', query)}</span>
           <span>depth=${escapeHtml(row.depth ?? '-')}</span>
-          <span>source=${escapeHtml(row.source_page || '-')}</span>
-          <span>source_kind=${escapeHtml(row.source_kind || '-')}</span>
+          <span>source=${highlightText(row.source_page || '-', query)}</span>
+          <span>source_kind=${highlightText(row.source_kind || '-', query)}</span>
           <span>discovery=#${escapeHtml(row.discovery_time ?? 0)}</span>
         </div>
         ${(row.error_message || row.error_kind)
-          ? `<div class="result-error">${escapeHtml(row.error_message || row.error_kind)}</div>`
+          ? `<div class="result-error">${highlightText(row.error_message || row.error_kind, query)}</div>`
           : ''}
+        <div class="result-actions">
+          <div class="result-link-list">
+            <a class="result-link export-link" href="${escapeHtml(row.url || '#')}" target="_blank" rel="noopener noreferrer">OPEN</a>
+            <button type="button" class="terminal-button result-copy" data-copy="${escapeHtml(row.url || '')}">COPY URL</button>
+          </div>
+          <span class="result-copy-feedback" aria-live="polite"></span>
+        </div>
         <details class="result-trace">
           <summary>TRACE</summary>
           <div class="result-trace-grid">
@@ -499,7 +584,8 @@ function renderResultLedger(data) {
         </details>
       </article>
     `).join('')
-    : '<span class="empty-note">NO RESULT RECORDS YET</span>';
+    : '<div class="result-zero-state">0 matches. Adjust the filter rites or clear the search to reveal hidden records.</div>';
+  bindLedgerActions();
 }
 
 function renderState(data) {
@@ -522,9 +608,7 @@ function renderState(data) {
   renderPanels(data);
   renderExports(data);
   renderRecords(data);
-  els.pauseButton.disabled = !data.can_pause;
-  els.stopButton.disabled = !data.can_stop;
-  els.beginButton.disabled = data.status === 'running' || data.status === 'paused' || data.status === 'stopping';
+  updateActionButtons(data);
   els.pauseButton.textContent = data.can_resume ? '> REAWAKEN THE RITE' : '> SUSPEND THE RITE';
   syncModeControls({ announce: false, preview: false });
 }
@@ -583,35 +667,41 @@ async function beginCrawl() {
     els.targetUrl.focus();
     return;
   }
-  try {
-    const data = await postJson('/api/crawl', payload);
-    renderState(data);
-  } catch (error) {
-    els.errorConsole.textContent = String(error.message || error);
-  }
+  await withActionLock('crawl', async () => {
+    try {
+      const data = await postJson('/api/crawl', payload);
+      renderState(data);
+    } catch (error) {
+      els.errorConsole.textContent = String(error.message || error);
+    }
+  });
 }
 
 async function togglePause() {
-  try {
-    const endpoint = state.status === 'paused' ? '/api/crawl/resume' : '/api/crawl/pause';
-    const data = await postJson(endpoint);
-    renderState(data);
-  } catch (error) {
-    els.errorConsole.textContent = String(error.message || error);
-  }
+  await withActionLock('pause', async () => {
+    try {
+      const endpoint = state.status === 'paused' ? '/api/crawl/resume' : '/api/crawl/pause';
+      const data = await postJson(endpoint);
+      renderState(data);
+    } catch (error) {
+      els.errorConsole.textContent = String(error.message || error);
+    }
+  });
 }
 
 async function stopCrawl() {
-  try {
-    const data = await postJson('/api/crawl/stop');
-    renderState(data);
-  } catch (error) {
-    els.errorConsole.textContent = String(error.message || error);
-  }
+  await withActionLock('stop', async () => {
+    try {
+      const data = await postJson('/api/crawl/stop');
+      renderState(data);
+    } catch (error) {
+      els.errorConsole.textContent = String(error.message || error);
+    }
+  });
 }
 
 function decryptText(node) {
-  const target = node.dataset.original || node.textContent;
+  const target = node.dataset.sourceText || node.dataset.original || node.textContent;
   node.dataset.original = target;
   const glyphs = '†‡▒░█<>/{}[]';
   let frame = 0;
@@ -638,16 +728,87 @@ function attachDecryptHover() {
   });
 }
 
+function bindLedgerActions() {
+  els.resultLedger.querySelectorAll('.result-copy').forEach((button) => {
+    if (button.dataset.bound === 'true') return;
+    button.dataset.bound = 'true';
+    button.addEventListener('click', async () => {
+      const value = button.dataset.copy || '';
+      const feedback = button.closest('.result-actions')?.querySelector('.result-copy-feedback');
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(value);
+        } else {
+          const helper = document.createElement('textarea');
+          helper.value = value;
+          document.body.appendChild(helper);
+          helper.select();
+          document.execCommand('copy');
+          helper.remove();
+        }
+        if (feedback) feedback.textContent = 'Copied.';
+      } catch (error) {
+        if (feedback) feedback.textContent = `Copy failed: ${String(error.message || error)}`;
+      }
+    });
+  });
+}
+
+function initializeCollapsiblePanels() {
+  document.querySelectorAll('[data-collapsible="mobile"]').forEach((panel) => {
+    if (panel.dataset.collapsibleBound === 'true') return;
+    const title = panel.querySelector('.panel-title');
+    if (!title) return;
+    const body = document.createElement('div');
+    body.className = 'panel-collapse-body';
+    const siblings = [];
+    let next = title.nextSibling;
+    while (next) {
+      siblings.push(next);
+      next = next.nextSibling;
+    }
+    siblings.forEach((node) => body.appendChild(node));
+    const header = document.createElement('div');
+    header.className = 'panel-header';
+    title.parentNode.insertBefore(header, title);
+    header.appendChild(title);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'panel-toggle';
+    const collapsedDefault = panel.dataset.collapsedDefault === 'true';
+    const setExpanded = (expanded) => {
+      body.classList.toggle('is-collapsed', !expanded);
+      button.textContent = expanded ? 'COLLAPSE' : 'EXPAND';
+      button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    };
+    button.addEventListener('click', () => {
+      setExpanded(button.getAttribute('aria-expanded') !== 'true');
+    });
+    header.appendChild(button);
+    panel.appendChild(body);
+    setExpanded(window.innerWidth > 980 ? true : !collapsedDefault);
+    panel.dataset.collapsibleBound = 'true';
+  });
+}
+
 function applyResultFilter() {
-  const query = (els.resultSearch?.value || '').trim().toLowerCase();
+  const query = (els.resultSearch?.value || '').trim();
+  const loweredQuery = query.toLowerCase();
   document.querySelectorAll('.result-item').forEach((node) => {
-    const visible = !query || node.textContent.toLowerCase().includes(query);
+    const rawText = node.dataset.sourceText || node.textContent;
+    const visible = !loweredQuery || rawText.toLowerCase().includes(loweredQuery);
+    node.innerHTML = highlightText(rawText, query);
     node.style.display = visible ? '' : 'none';
   });
   document.querySelectorAll('#resultPanels .terminal-panel').forEach((panel) => {
-    const anyVisible = Array.from(panel.querySelectorAll('.result-item')).some((item) => item.style.display !== 'none');
-    const hasEmpty = panel.querySelector('.empty-note');
-    panel.style.display = (anyVisible || hasEmpty || !query) ? '' : 'none';
+    const items = Array.from(panel.querySelectorAll('.result-item'));
+    const visibleCount = items.filter((item) => item.style.display !== 'none').length;
+    const stateNode = panel.querySelector('.panel-match-state');
+    if (stateNode) {
+      stateNode.textContent = visibleCount
+        ? `Showing ${visibleCount} panel item${visibleCount === 1 ? '' : 's'}${query ? ` matching "${query}"` : '.'}`
+        : `0 matches${query ? ` for "${query}"` : ''}.`;
+    }
   });
 }
 
@@ -670,7 +831,13 @@ els.resultSort.addEventListener('change', () => {
     renderResultLedger(state.lastState);
   }
 });
-['resultStateFilter', 'resultErrorFilter', 'resultTypeFilter', 'resultSourceFilter'].forEach((key) => {
+els.resultSortDirection.addEventListener('change', () => {
+  state.sortDirection = els.resultSortDirection.value;
+  if (state.lastState) {
+    renderResultLedger(state.lastState);
+  }
+});
+['resultStateFilter', 'resultStatusBucketFilter', 'resultErrorFilter', 'resultTypeFilter', 'resultSourceFilter'].forEach((key) => {
   els[key].addEventListener('change', () => {
     if (state.lastState) {
       renderResultLedger(state.lastState);
@@ -685,6 +852,18 @@ els.rerunSetupCheckButton.addEventListener('click', refreshSetupDiagnostics);
 
 bindFlagAnnouncements();
 syncModeControls();
+initializeCollapsiblePanels();
 refreshState();
 refreshSetupDiagnostics();
 state.timer = setInterval(refreshState, 1500);
+window.addEventListener('resize', () => {
+  document.querySelectorAll('[data-collapsible="mobile"]').forEach((panel) => {
+    const body = panel.querySelector('.panel-collapse-body');
+    const button = panel.querySelector('.panel-toggle');
+    if (!body || !button) return;
+    const shouldExpand = window.innerWidth > 980;
+    body.classList.toggle('is-collapsed', !shouldExpand && panel.dataset.collapsedDefault === 'true');
+    button.textContent = body.classList.contains('is-collapsed') ? 'EXPAND' : 'COLLAPSE';
+    button.setAttribute('aria-expanded', body.classList.contains('is-collapsed') ? 'false' : 'true');
+  });
+});

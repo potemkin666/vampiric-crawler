@@ -84,6 +84,9 @@ STATUS_MESSAGES = {
     'empty': 'THE ARCHIVE IS SILENT',
     'stopping': 'HALT RITE',
 }
+TIMELINE_JSONL_NAME = 'event-timeline.jsonl'
+TIMELINE_JSON_NAME = 'event-timeline.json'
+RENDERED_EVIDENCE_NAME = 'rendered-evidence.json'
 
 
 def default_queue_snapshot() -> dict[str, dict[str, Any]]:
@@ -137,6 +140,33 @@ def read_stats(path: Path) -> dict[str, Any]:
             except ValueError:
                 stats[key] = value
     return stats
+
+
+def read_json_lines(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    entries = []
+    with path.open('r', encoding='utf-8') as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                entries.append(payload)
+    return entries
+
+
+def materialize_timeline_json(output_dir: Path) -> Path | None:
+    jsonl_path = output_dir / TIMELINE_JSONL_NAME
+    if not jsonl_path.exists():
+        return None
+    json_path = output_dir / TIMELINE_JSON_NAME
+    json_path.write_text(json.dumps(read_json_lines(jsonl_path), indent=2, ensure_ascii=False), encoding='utf-8')
+    return json_path
 
 
 def parse_redirects(items: list[str]) -> dict[str, list[str]]:
@@ -351,6 +381,20 @@ class CrawlRun:
     robots_metadata: dict[str, Any] = field(default_factory=default_robots_metadata)
     sitemap_metadata: dict[str, Any] = field(default_factory=default_sitemap_metadata)
 
+    def __post_init__(self) -> None:
+        self.timeline_jsonl_path = self.output_dir / TIMELINE_JSONL_NAME
+        self.timeline_json_path = self.output_dir / TIMELINE_JSON_NAME
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _append_timeline_entry(self, entry_type: str, payload: dict[str, Any]) -> None:
+        record = {
+            'timestamp': now_iso(),
+            'type': entry_type,
+            'payload': payload,
+        }
+        with self.timeline_jsonl_path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+
     def ingest_log(self, raw_line: str) -> None:
         line = strip_ansi(raw_line)
         if not line:
@@ -361,6 +405,7 @@ class CrawlRun:
         with self.lock:
             self.logs.append(line)
             lowered = line.lower()
+            channels = ['logs']
             if (
                 'internal page:' in lowered
                 or 'external page:' in lowered
@@ -370,6 +415,7 @@ class CrawlRun:
                 or 'harvest summary' in lowered
             ):
                 self.feed.append(line)
+                channels.append('feed')
             if (
                 'failed to feed' in lowered
                 or 'rejected by the prey' in lowered
@@ -379,6 +425,11 @@ class CrawlRun:
                 or 'disabled' in lowered
             ):
                 self.errors.append(line)
+                channels.append('errors')
+        self._append_timeline_entry('log', {
+            'line': line,
+            'channels': channels,
+        })
 
     def ingest_event(self, payload: str) -> None:
         try:
@@ -432,6 +483,10 @@ class CrawlRun:
                 if url:
                     parts.append(f'url={url}')
                 self.errors.append(' | '.join(parts))
+        self._append_timeline_entry('event', {
+            'event_type': str(event_type or ''),
+            'payload': data if isinstance(data, dict) else {},
+        })
 
     def snapshot(self, history: list[dict[str, Any]]) -> dict[str, Any]:
         datasets, stats = collect_run_artifacts(self.output_dir, self.checkpoint_path)
@@ -827,6 +882,9 @@ def build_exports(output_dir: Path, run_id: str | None = None) -> list[dict[str,
         ('autopsy-json', 'AUTOPSY JSON', output_dir / 'autopsy.json'),
         ('autopsy-md', 'AUTOPSY MD', output_dir / 'autopsy.md'),
         ('manifest-json', 'CRAWL MANIFEST', output_dir / 'crawl-manifest.json'),
+        ('rendered-evidence', 'RENDERED EVIDENCE', output_dir / RENDERED_EVIDENCE_NAME),
+        ('timeline-jsonl', 'EVENT TIMELINE JSONL', output_dir / TIMELINE_JSONL_NAME),
+        ('timeline-json', 'EVENT TIMELINE JSON', output_dir / TIMELINE_JSON_NAME),
         ('bundle', 'EXPORT BUNDLE', output_dir / 'sealed-bundle.zip'),
     )
     href_prefix = f'/api/runs/{run_id}/exports' if run_id else '/api/exports'
@@ -840,6 +898,7 @@ def build_exports(output_dir: Path, run_id: str | None = None) -> list[dict[str,
 def ensure_exports(run: CrawlRun) -> None:
     if run.exports_ready:
         return
+    materialize_timeline_json(run.output_dir)
     datasets, stats = collect_run_artifacts(run.output_dir, run.checkpoint_path)
     runtime_config = RuntimeConfig.from_mapping(run.payload)
     payload = {name: values for name, values in datasets.items() if values}
@@ -914,10 +973,10 @@ def ensure_exports(run: CrawlRun) -> None:
     )
     bundle_path = run.output_dir / 'sealed-bundle.zip'
     with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        for child in sorted(run.output_dir.iterdir()):
-            if child.name == bundle_path.name:
+        for child in sorted(run.output_dir.rglob('*')):
+            if child.name == bundle_path.name or child.is_dir():
                 continue
-            archive.write(child, arcname=child.name)
+            archive.write(child, arcname=str(child.relative_to(run.output_dir)))
         archive.writestr('crawl-config.json', json.dumps({
             'payload': run.payload,
             'command': run.command,
@@ -1159,6 +1218,9 @@ class CrawlManager:
             'autopsy-json': output_dir / 'autopsy.json',
             'autopsy-md': output_dir / 'autopsy.md',
             'manifest-json': output_dir / 'crawl-manifest.json',
+            'rendered-evidence': output_dir / RENDERED_EVIDENCE_NAME,
+            'timeline-jsonl': output_dir / TIMELINE_JSONL_NAME,
+            'timeline-json': output_dir / TIMELINE_JSON_NAME,
             'bundle': output_dir / 'sealed-bundle.zip',
         }
         path = mapping.get(kind)

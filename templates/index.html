@@ -156,7 +156,7 @@
               <label class="flag-option" data-flag="dry"><input id="dryRun" type="checkbox"><span class="flag-label">DRY RUN ONLY</span></label>
             </div>
           </fieldset>
-          <div class="command-buttons">
+          <div class="command-buttons command-buttons--sticky">
             <button type="button" id="beginButton" class="terminal-button terminal-button--primary">&gt; OPEN THE CRYPT</button>
             <button type="button" id="pauseButton" class="terminal-button">&gt; SUSPEND THE RITE</button>
             <button type="button" id="stopButton" class="terminal-button terminal-button--danger">&gt; DRIVE IN THE STAKE</button>
@@ -181,7 +181,7 @@
         </section>
       </section>
 
-      <section class="terminal-panel">
+      <section class="terminal-panel" data-collapsible="mobile">
         <div class="panel-title">FIRST-RUN DIAGNOSTICS</div>
         <div class="state-banner" id="setupCheckStatus">RUNNING FIRST-RUN DIAGNOSTICS…</div>
         <div class="command-buttons">
@@ -191,37 +191,37 @@
       </section>
 
       <section class="terminal-grid status-grid">
-        <section class="terminal-panel">
+        <section class="terminal-panel" data-collapsible="mobile">
           <div class="panel-title">PAUSE / RESUME STATE</div>
           <div class="state-banner" id="pauseStateBanner">THE RITE IS DORMANT</div>
           <pre class="terminal-log selectable compact-log" id="pauseStateDetail">Awaiting the next command.</pre>
         </section>
 
-        <section class="terminal-panel">
+        <section class="terminal-panel" data-collapsible="mobile" data-collapsed-default="true">
           <div class="panel-title">VISIBLE CRAWL QUEUE</div>
           <div class="queue-grid" id="queuePanel"></div>
         </section>
       </section>
 
         <section class="terminal-grid content-grid">
-          <section class="terminal-panel tall-panel">
+          <section class="terminal-panel tall-panel" data-collapsible="mobile">
           <div class="panel-title">POLLED CRAWL SNAPSHOT</div>
           <pre class="terminal-log selectable" id="liveFeed">Awaiting target acquisition…</pre>
         </section>
 
-        <section class="terminal-panel tall-panel">
+        <section class="terminal-panel tall-panel" data-collapsible="mobile">
           <div class="panel-title">STATUS AND ERROR CONSOLE</div>
           <pre class="terminal-log selectable" id="errorConsole">No omens yet.</pre>
         </section>
       </section>
 
       <section class="terminal-grid content-grid">
-        <section class="terminal-panel tall-panel">
+        <section class="terminal-panel tall-panel" data-collapsible="mobile" data-collapsed-default="true">
           <div class="panel-title">ROBOTS.TXT OMENS</div>
           <pre class="terminal-log selectable" id="robotsPanel">No robots rules observed yet.</pre>
         </section>
 
-        <section class="terminal-panel tall-panel">
+        <section class="terminal-panel tall-panel" data-collapsible="mobile" data-collapsed-default="true">
           <div class="panel-title">SITEMAP VIEWER</div>
           <pre class="terminal-log selectable" id="sitemapPanel">No sitemap sigils observed yet.</pre>
         </section>
@@ -230,9 +230,10 @@
       <section class="terminal-panel">
         <div class="panel-title">RESULT FILTER</div>
         <input id="resultSearch" type="search" placeholder="Filter result panels and items" autocomplete="off">
+        <div class="filter-summary" id="resultFilterSummary">Showing all results.</div>
       </section>
 
-      <section class="terminal-panel">
+      <section class="terminal-panel" data-collapsible="mobile">
         <div class="panel-title">SORTABLE RESULT LEDGER</div>
         <div class="result-toolbar">
           <label for="resultSort">SORT BY</label>
@@ -243,9 +244,18 @@
             <option value="depth">DEPTH</option>
             <option value="source_page">SOURCE PAGE</option>
           </select>
+          <label for="resultSortDirection">ORDER</label>
+          <select id="resultSortDirection">
+            <option value="desc">DESCENDING</option>
+            <option value="asc">ASCENDING</option>
+          </select>
           <label for="resultStateFilter">STATE</label>
           <select id="resultStateFilter">
             <option value="">ALL STATES</option>
+          </select>
+          <label for="resultStatusBucketFilter">STATUS BUCKET</label>
+          <select id="resultStatusBucketFilter">
+            <option value="">ALL BUCKETS</option>
           </select>
           <label for="resultErrorFilter">ERROR</label>
           <select id="resultErrorFilter">
@@ -265,7 +275,7 @@
 
       <section class="panel-stack" id="resultPanels"></section>
 
-      <section class="terminal-panel summary-panel">
+      <section class="terminal-panel summary-panel" data-collapsible="mobile" data-collapsed-default="true">
         <div class="panel-title">SEALED RECORDS</div>
         <div class="records-list" id="sealedRecords">
           <span class="empty-note">NO SEALED RECORDS YET</span>

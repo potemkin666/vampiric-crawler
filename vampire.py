@@ -479,6 +479,7 @@ processed = set()
 bad_scripts = set()
 bad_intel = set()
 artifact_genealogy = {}
+rendered_evidence = {}
 content_types = {}
 render_state = {'disabled': False, 'message': None}
 render_lock = threading.Lock()
@@ -527,6 +528,7 @@ if resume_state:
     bad_scripts.update(restored['bad_scripts'])
     bad_intel.update(restored['bad_intel'])
     artifact_genealogy.update(restore_genealogy(normalize_checkpoint_mapping(resume_state, 'artifact_genealogy')))
+    rendered_evidence.update(normalize_checkpoint_mapping(resume_state, 'rendered_evidence'))
     content_types.update(normalize_checkpoint_mapping(resume_state, 'content_types'))
     stats = CrawlStats.from_snapshot(resume_state.get('stats'))
     restored_queue_state = normalize_checkpoint_mapping(resume_state, 'queue_state')
@@ -806,6 +808,7 @@ def checkpoint_payload(stage):
         'site_anatomy': sorted(site_anatomy),
         'mutation_probes': sorted(mutation_probes),
         'artifact_genealogy': finalize_genealogy(artifact_genealogy),
+        'rendered_evidence': rendered_evidence,
         'processed': sorted(processed),
         'bad_scripts': sorted(bad_scripts),
         'bad_intel': [
@@ -975,6 +978,7 @@ def maybe_render_page(url, result):
             headers=headers,
             cookie=cook,
             user_agent=random.choice(user_agents) if user_agents else None,
+            evidence_dir=os.path.join(output_dir, 'rendered'),
         )
     except Exception as exc:
         with render_lock:
@@ -983,6 +987,27 @@ def maybe_render_page(url, result):
                 render_state['message'] = str(exc)
                 print(f'{coffin}JS rendering disabled: {exc}')
         return result.text
+    rendered_metadata = dict(rendered.metadata or {})
+    if rendered_metadata:
+        rendered_evidence[url] = rendered_metadata
+        record_artifact_discovery(artifact_genealogy, url, discovered_on=url, source_kind='rendered-page', note='rendered-evidence')
+        render_notes = []
+        if rendered.dom_sha256:
+            render_notes.append('dom_sha256=' + rendered.dom_sha256)
+        if rendered.screenshot_path:
+            render_notes.append('screenshot=' + os.path.relpath(rendered.screenshot_path, output_dir))
+        if rendered.metadata_path:
+            render_notes.append('evidence=' + os.path.relpath(rendered.metadata_path, output_dir))
+        if rendered.final_url and rendered.final_url != url:
+            render_notes.append('final_url=' + rendered.final_url)
+        update_artifact_observation(
+            artifact_genealogy,
+            url,
+            content_type='text/html',
+            body=(rendered.html or '').encode('utf-8', 'ignore'),
+            metadata=render_notes,
+            seen_label='render-js',
+        )
     for discovered_url in rendered.urls:
         mark_scope(discovered_url, url, 'rendered-link')
     return rendered.html or result.text
@@ -1540,6 +1565,11 @@ manifest = build_crawl_manifest(
     run_metadata=run_metadata,
 )
 manifest_path = write_manifest_file(output_dir, manifest)
+rendered_evidence_path = ''
+if rendered_evidence:
+    rendered_evidence_path = os.path.join(output_dir, 'rendered-evidence.json')
+    with open(rendered_evidence_path, 'w', encoding='utf-8') as handle:
+        json.dump(rendered_evidence, handle, indent=2, ensure_ascii=False)
 
 if mode == 'temporal' and previous_snapshot:
     temporal_diffs = build_temporal_diffs(
@@ -1590,6 +1620,10 @@ if mode == 'temporal':
         run_metadata=run_metadata,
     )
     manifest_path = write_manifest_file(output_dir, manifest)
+    if rendered_evidence:
+        rendered_evidence_path = os.path.join(output_dir, 'rendered-evidence.json')
+        with open(rendered_evidence_path, 'w', encoding='utf-8') as handle:
+            json.dump(rendered_evidence, handle, indent=2, ensure_ascii=False)
 
 snapshot_path = write_structured_snapshot_file(
     output_dir,
@@ -1605,6 +1639,8 @@ snapshot_path = write_structured_snapshot_file(
 print(f'{fang}Autopsy JSON    {autopsy_json_path}')
 print(f'{fang}Autopsy MD      {autopsy_md_path}')
 print(f'{fang}Manifest        {manifest_path}')
+if rendered_evidence_path:
+    print(f'{fang}Rendered proof  {rendered_evidence_path}')
 print(f'{fang}Baseline        {snapshot_path}')
 
 write_checkpoint('complete')

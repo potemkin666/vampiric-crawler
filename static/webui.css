@@ -428,6 +428,13 @@ body::after {
   color: var(--text-bone);
 }
 
+.filter-summary,
+.panel-match-state {
+  margin-top: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
 .terminal-button,
 .export-link {
   appearance: none;
@@ -453,6 +460,14 @@ body::after {
 .terminal-button:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+}
+
+.terminal-button.is-busy {
+  opacity: 0.75;
+}
+
+.terminal-button.is-busy::after {
+  content: " …";
 }
 
 .terminal-button--primary {
@@ -563,8 +578,19 @@ body::after {
   font: inherit;
 }
 
+.result-toolbar label {
+  white-space: nowrap;
+}
+
 .result-ledger {
   margin-top: 1rem;
+}
+
+.result-ledger mark,
+.result-item mark {
+  background: rgba(227, 161, 63, 0.28);
+  color: var(--text-bone);
+  padding: 0 0.08rem;
 }
 
 .result-meta {
@@ -574,6 +600,35 @@ body::after {
 .result-error {
   margin-top: 0.55rem;
   color: var(--accent-amber);
+}
+
+.result-row-header,
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.result-actions {
+  margin-top: 0.75rem;
+}
+
+.result-actions .terminal-button,
+.result-actions .result-link {
+  padding: 0.45rem 0.65rem;
+}
+
+.result-zero-state {
+  padding: 0.9rem;
+  border: 1px dashed rgba(227, 161, 63, 0.3);
+  color: var(--accent-amber);
+}
+
+.result-copy-feedback {
+  color: var(--text-muted);
+  font-size: 0.85rem;
 }
 
 .result-trace {
@@ -621,6 +676,28 @@ body::after {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.panel-header {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel-toggle {
+  display: none;
+  appearance: none;
+  border: 1px solid rgba(133, 255, 152, 0.25);
+  background: rgba(5, 10, 7, 0.9);
+  color: var(--text-phosphor);
+  font: inherit;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+}
+
+.panel-collapse-body.is-collapsed {
+  display: none;
+}
+
 [data-status="running"] .sigil {
   animation: pulse-sigil 1.2s ease-in-out infinite;
 }
@@ -661,6 +738,10 @@ body::after {
 }
 
 @media (max-width: 980px) {
+  .app-shell {
+    padding: 0.65rem;
+  }
+
   .controls-grid,
   .status-grid,
   .content-grid {
@@ -669,6 +750,77 @@ body::after {
 
   .field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .hero-panel {
+    padding: 0.9rem;
+  }
+
+  .hero-copy h1 {
+    font-size: clamp(1.35rem, 7vw, 2rem);
+  }
+
+  .boot-banner {
+    font-size: 0.36rem;
+    line-height: 1.2;
+  }
+
+  .terminal-log {
+    max-height: 13rem;
+  }
+
+  .compact-log {
+    max-height: 8rem;
+  }
+
+  .queue-grid,
+  .records-list,
+  .result-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .result-toolbar {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .result-toolbar select,
+  .result-toolbar label,
+  #resultSearch {
+    width: 100%;
+  }
+
+  .command-buttons--sticky {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    padding: 0.7rem 0;
+    margin: 1rem -0.2rem 0;
+    background: linear-gradient(180deg, rgba(3, 5, 4, 0), rgba(3, 5, 4, 0.96) 28%);
+  }
+
+  .terminal-button {
+    flex: 1 1 100%;
+    text-align: center;
+  }
+
+  .panel-toggle {
+    display: inline-flex;
+  }
+
+  [data-collapsible="mobile"] .panel-title {
+    margin-bottom: 0;
+  }
+
+  .panel-header {
+    margin-bottom: 0.75rem;
+  }
+
+  .result-row-header,
+  .result-actions {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

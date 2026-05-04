@@ -270,6 +270,9 @@ class FakePage(object):
     def eval_on_selector_all(self, selector, script):
         return ['https://example.com/rendered-only']
 
+    def screenshot(self, full_page=True, type='png'):
+        return b'\x89PNG\r\n\x1a\nfake'
+
 
 class FakeContext(object):
     def __init__(self):
