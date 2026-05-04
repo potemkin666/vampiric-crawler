@@ -559,8 +559,9 @@ def _first_meta_value(meta: dict[str, str], keys: tuple[str, ...]) -> str:
 def _looks_like_place_guess(value: str) -> bool:
     if not value or value in WEAK_PLACE_STOPWORDS:
         return False
-    if len(value.split()) < 2:
-        return False
+    parts = value.split()
+    if len(parts) == 1:
+        return len(value) >= 4 and value[0].isupper()
     return True
 
 
