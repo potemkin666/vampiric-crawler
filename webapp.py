@@ -974,7 +974,7 @@ def ensure_exports(run: CrawlRun) -> None:
     bundle_path = run.output_dir / 'sealed-bundle.zip'
     with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for child in sorted(run.output_dir.rglob('*')):
-            if child.name == bundle_path.name or child.is_dir():
+            if child == bundle_path or child.is_dir():
                 continue
             archive.write(child, arcname=str(child.relative_to(run.output_dir)))
         archive.writestr('crawl-config.json', json.dumps({

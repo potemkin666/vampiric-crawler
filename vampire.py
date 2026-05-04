@@ -1565,7 +1565,7 @@ manifest = build_crawl_manifest(
     run_metadata=run_metadata,
 )
 manifest_path = write_manifest_file(output_dir, manifest)
-rendered_evidence_path = ''
+rendered_evidence_path = None
 if rendered_evidence:
     rendered_evidence_path = os.path.join(output_dir, 'rendered-evidence.json')
     with open(rendered_evidence_path, 'w', encoding='utf-8') as handle:

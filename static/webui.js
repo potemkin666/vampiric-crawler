@@ -81,6 +81,7 @@ const MODE_CONFIG = {
 const DEFAULT_SPECIMEN = 'https://example.com';
 const DRY_RUN_ON_MESSAGE = 'Dry run is enabled: the crawl button validates the rite and exits before visiting the target.';
 const DRY_RUN_OFF_MESSAGE = 'Dry run is disabled: the crawl button will visit the target.';
+let panelResizeTimer = null;
 
 const els = {
   app: document.getElementById('app'),
@@ -857,6 +858,8 @@ refreshState();
 refreshSetupDiagnostics();
 state.timer = setInterval(refreshState, 1500);
 window.addEventListener('resize', () => {
+  clearTimeout(panelResizeTimer);
+  panelResizeTimer = setTimeout(() => {
   document.querySelectorAll('[data-collapsible="mobile"]').forEach((panel) => {
     const body = panel.querySelector('.panel-collapse-body');
     const button = panel.querySelector('.panel-toggle');
@@ -866,4 +869,5 @@ window.addEventListener('resize', () => {
     button.textContent = body.classList.contains('is-collapsed') ? 'EXPAND' : 'COLLAPSE';
     button.setAttribute('aria-expanded', body.classList.contains('is-collapsed') ? 'false' : 'true');
   });
+  }, 120);
 });
