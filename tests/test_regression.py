@@ -367,7 +367,7 @@ class RegressionTests(unittest.TestCase):
                 'external': [
                     'https://www.googletagmanager.com/gtm.js',
                     'https://cdn.example.net/app.js',
-                    'https://docs.partner.example.org/readme',
+                    'https://partner.example.org/readme',
                     'https://github.com/example/project',
                 ],
                 'files': [],
@@ -382,7 +382,7 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertIn('https://www.googletagmanager.com/gtm.js', anatomy['analytics'])
         self.assertIn('https://cdn.example.net/app.js', anatomy['cdn_assets'])
-        self.assertIn('https://docs.partner.example.org/readme', anatomy['external_refs'])
+        self.assertIn('https://partner.example.org/readme', anatomy['external_refs'])
         self.assertIn('https://github.com/example/project', anatomy['trust_links'])
 
     def test_fixture_handler_send_accepts_binary_payloads(self):
@@ -776,7 +776,7 @@ class RegressionTests(unittest.TestCase):
 
                 with open(os.path.join(output_dir, 'crawl-manifest.json'), 'r', encoding='utf-8') as handle:
                     manifest = json.load(handle)
-                self.assertEqual(manifest['target']['main_url'], server.base_url)
+                self.assertEqual(manifest['target']['main_url'], server.base_url + '/')
                 self.assertEqual(manifest['lineage']['checkpoint_path'], '')
                 self.assertIn('autopsy.json', manifest['artifacts'])
                 self.assertIn('results.json', manifest['artifacts'])
