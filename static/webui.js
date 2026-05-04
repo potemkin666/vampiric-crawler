@@ -73,6 +73,8 @@ const MODE_CONFIG = {
 };
 
 const DEFAULT_SPECIMEN = 'https://example.com';
+const DRY_RUN_ON_MESSAGE = 'Dry run is enabled: the crawl button validates the rite and exits before visiting the target.';
+const DRY_RUN_OFF_MESSAGE = 'Dry run is disabled: the crawl button will visit the target.';
 
 const els = {
   app: document.getElementById('app'),
@@ -170,7 +172,7 @@ function defaultCommandPreview(payload) {
 function updateIdlePreview(payload) {
   const notes = [
     'Awaiting target specimen to build preview.',
-    payload.dry_run ? 'Dry run is enabled: the crawl button will only validate the plan and exit without sending requests.' : 'Dry run is disabled: the crawl button will start a live crawl.',
+    payload.dry_run ? DRY_RUN_ON_MESSAGE : DRY_RUN_OFF_MESSAGE,
   ];
   els.commandPreview.textContent = defaultCommandPreview(payload);
   els.configPreview.textContent = notes.join('\n');
@@ -194,7 +196,7 @@ async function renderCommandPreview() {
       `Target URL: ${resolved.target_url || '-'}`,
       `Depth=${resolved.depth} Threads=${resolved.threads} Delay=${resolved.delay} Timeout=${resolved.timeout}`,
       `Flags: scope=${resolved.scope} render=${resolved.render_js} archive=${resolved.archive_seeds} dns=${resolved.enumerate_subdomains} dry=${resolved.dry_run}`,
-      resolved.dry_run ? 'Dry run enabled: the crawl button validates the rite and exits before visiting the target.' : 'Dry run disabled: the crawl button will visit the target.',
+      resolved.dry_run ? DRY_RUN_ON_MESSAGE : DRY_RUN_OFF_MESSAGE,
       `Shadow words: ${(resolved.hidden_words || []).join(', ') || '-'}`,
       `Temporal baseline: ${resolved.temporal_baseline || '-'}`,
     ].join('\n');

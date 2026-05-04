@@ -11,12 +11,15 @@ class WebAppTests(RegressionTestCase):
         self.assertIn('id="flagStatus" aria-live="polite" aria-atomic="true"', template)
         self.assertIn('id="beginButton" class="terminal-button terminal-button--primary"', template)
         self.assertIn('Use the crawl button to start a rite.', template)
+        self.assertIn('Dry run is enabled: the crawl button validates the rite and exits before visiting the target.', template)
         self.assertNotIn('[X] EXTRACT MAIL SIGILS', template)
         self.assertIn('Awaiting target specimen to build preview.', script)
+        self.assertIn('const DRY_RUN_ON_MESSAGE =', script)
         self.assertNotIn("els.form.addEventListener('keydown'", script)
         self.assertIn('.sr-only {', stylesheet)
         self.assertIn('.flag-fieldset {', stylesheet)
-        self.assertIn('url("https://github.com/user-attachments/assets/db518b2e-f891-45b0-982d-54e9f927fde7")', stylesheet)
+        self.assertIn('--background-scene: url(', stylesheet)
+        self.assertIn('var(--background-scene)', stylesheet)
 
     def test_web_ui_build_crawl_command_maps_flags(self):
         with tempfile.TemporaryDirectory() as tmpdir:
