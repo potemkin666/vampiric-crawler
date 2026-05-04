@@ -72,6 +72,8 @@ const MODE_CONFIG = {
   },
 };
 
+const DEFAULT_SPECIMEN = 'https://example.com';
+
 const els = {
   app: document.getElementById('app'),
   form: document.getElementById('crawlForm'),
@@ -161,8 +163,25 @@ function formPayload() {
   };
 }
 
+function defaultCommandPreview(payload) {
+  return `> CRAWL ${payload.target_specimen || DEFAULT_SPECIMEN} --depth ${payload.depth}`;
+}
+
+function updateIdlePreview(payload) {
+  const notes = [
+    'Awaiting target specimen to build preview.',
+    payload.dry_run ? 'Dry run is enabled: the crawl button will only validate the plan and exit without sending requests.' : 'Dry run is disabled: the crawl button will start a live crawl.',
+  ];
+  els.commandPreview.textContent = defaultCommandPreview(payload);
+  els.configPreview.textContent = notes.join('\n');
+}
+
 async function renderCommandPreview() {
   const payload = formPayload();
+  if (!payload.target_specimen) {
+    updateIdlePreview(payload);
+    return;
+  }
   try {
     const preview = await postJson('/api/preview', payload);
     els.commandPreview.textContent = `> ${preview.command_preview}`;
@@ -175,16 +194,17 @@ async function renderCommandPreview() {
       `Target URL: ${resolved.target_url || '-'}`,
       `Depth=${resolved.depth} Threads=${resolved.threads} Delay=${resolved.delay} Timeout=${resolved.timeout}`,
       `Flags: scope=${resolved.scope} render=${resolved.render_js} archive=${resolved.archive_seeds} dns=${resolved.enumerate_subdomains} dry=${resolved.dry_run}`,
+      resolved.dry_run ? 'Dry run enabled: the crawl button validates the rite and exits before visiting the target.' : 'Dry run disabled: the crawl button will visit the target.',
       `Shadow words: ${(resolved.hidden_words || []).join(', ') || '-'}`,
       `Temporal baseline: ${resolved.temporal_baseline || '-'}`,
     ].join('\n');
   } catch (error) {
-    els.commandPreview.textContent = `> CRAWL ${payload.target_specimen || 'https://example.com'} --depth ${payload.depth}`;
+    els.commandPreview.textContent = defaultCommandPreview(payload);
     els.configPreview.textContent = `Failed to load preview: ${String(error.message || error)}`;
   }
 }
 
-function syncModeControls() {
+function syncModeControls({ announce = true, preview = true } = {}) {
   const config = MODE_CONFIG[els.crawlMode.value] || MODE_CONFIG.generic;
   els.modeHint.textContent = `${config.label} // ${config.description}`;
   document.querySelectorAll('[data-flag]').forEach((node) => {
@@ -202,8 +222,12 @@ function syncModeControls() {
   if (Object.prototype.hasOwnProperty.call(config.force, 'render')) {
     els.renderJs.checked = config.force.render;
   }
-  announceFlagSummary(`Mode changed to ${config.label}. ${describeVisibleFlags()}`);
-  renderCommandPreview();
+  if (announce) {
+    announceFlagSummary(`Mode changed to ${config.label}. ${describeVisibleFlags()}`);
+  }
+  if (preview) {
+    renderCommandPreview();
+  }
 }
 
 function describeVisibleFlags() {
@@ -500,7 +524,7 @@ function renderState(data) {
   els.stopButton.disabled = !data.can_stop;
   els.beginButton.disabled = data.status === 'running' || data.status === 'paused' || data.status === 'stopping';
   els.pauseButton.textContent = data.can_resume ? '> REAWAKEN THE RITE' : '> SUSPEND THE RITE';
-  syncModeControls();
+  syncModeControls({ announce: false, preview: false });
 }
 
 async function postJson(url, payload = {}) {
@@ -630,13 +654,6 @@ function applyResultFilter() {
 });
 els.form.addEventListener('submit', (event) => {
   event.preventDefault();
-  beginCrawl();
-});
-els.form.addEventListener('keydown', (event) => {
-  if (event.key !== 'Enter') return;
-  if (event.target instanceof HTMLTextAreaElement) return;
-  event.preventDefault();
-  beginCrawl();
 });
 els.crawlMode.addEventListener('change', syncModeControls);
 els.resultSearch.addEventListener('input', () => {

@@ -34,8 +34,14 @@ body {
 body {
   margin: 0;
   background:
+    linear-gradient(rgba(3, 5, 4, 0.8), rgba(3, 5, 4, 0.92)),
+    url("https://github.com/user-attachments/assets/db518b2e-f891-45b0-982d-54e9f927fde7"),
     radial-gradient(circle at top, rgba(98, 25, 35, 0.18), transparent 36%),
     linear-gradient(180deg, #060906, var(--bg-void));
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-attachment: fixed;
   color: var(--text-phosphor);
   font-family: var(--font-mono);
   line-height: 1.45;
@@ -414,6 +420,11 @@ body::after {
   flex-wrap: wrap;
   gap: 0.75rem;
   margin-top: 1rem;
+}
+
+.button-help {
+  margin: 0.85rem 0 0;
+  color: var(--text-bone);
 }
 
 .terminal-button,

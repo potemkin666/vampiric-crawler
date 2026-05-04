@@ -5,12 +5,18 @@ class WebAppTests(RegressionTestCase):
     def test_web_ui_flag_controls_use_semantic_grouping(self):
         template = Path(REPO_ROOT, 'templates', 'index.html').read_text(encoding='utf-8')
         stylesheet = Path(REPO_ROOT, 'static', 'webui.css').read_text(encoding='utf-8')
+        script = Path(REPO_ROOT, 'static', 'webui.js').read_text(encoding='utf-8')
         self.assertIn('<fieldset class="flag-fieldset" aria-describedby="flagHelp">', template)
         self.assertIn('<legend>SCOPE AND EXTRACTION FLAGS</legend>', template)
         self.assertIn('id="flagStatus" aria-live="polite" aria-atomic="true"', template)
+        self.assertIn('id="beginButton" class="terminal-button terminal-button--primary"', template)
+        self.assertIn('Use the crawl button to start a rite.', template)
         self.assertNotIn('[X] EXTRACT MAIL SIGILS', template)
+        self.assertIn('Awaiting target specimen to build preview.', script)
+        self.assertNotIn("els.form.addEventListener('keydown'", script)
         self.assertIn('.sr-only {', stylesheet)
         self.assertIn('.flag-fieldset {', stylesheet)
+        self.assertIn('url("https://github.com/user-attachments/assets/db518b2e-f891-45b0-982d-54e9f927fde7")', stylesheet)
 
     def test_web_ui_build_crawl_command_maps_flags(self):
         with tempfile.TemporaryDirectory() as tmpdir:
