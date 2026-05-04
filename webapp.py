@@ -144,6 +144,7 @@ def parse_redirects(items: list[str]) -> dict[str, list[str]]:
     mapping: dict[str, list[str]] = {}
     for item in items:
         source, _, trail = item.partition(' => ')
+        source = source.strip()
         if not source or not trail:
             continue
         chain = []

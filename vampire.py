@@ -1446,7 +1446,7 @@ if diff > 0:
 print(f'{fang}Redirects       {stats_summary["redirects"]}')
 print(f'{fang}Skipped         {stats_summary["skipped"]}')
 print(f'{fang}Failures        {stats_summary["failures"]}')
-print(f'{fang}Exported        {len(dataset_names) + 4}')
+print(f'{fang}Exported        {len(dataset_names) + len(export_names)}')
 print(f'{fang}Top types       {", ".join(f"{name}:{count}" for name, count in top_content_types) or "-"}')
 
 if args.dns:
