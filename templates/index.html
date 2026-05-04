@@ -277,9 +277,11 @@
 
       <section class="terminal-panel summary-panel" data-collapsible="mobile" data-collapsed-default="true">
         <div class="panel-title">SEALED RECORDS</div>
+        <div class="filter-summary" id="runBrowserSummary">Awaiting sealed records.</div>
         <div class="records-list" id="sealedRecords">
           <span class="empty-note">NO SEALED RECORDS YET</span>
         </div>
+        <div class="result-ledger" id="runBrowserDetail"></div>
       </section>
     </main>
     <script src="{{ url_for('static', filename='webui.js') }}" defer></script>

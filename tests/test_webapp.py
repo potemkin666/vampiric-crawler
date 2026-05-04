@@ -15,17 +15,22 @@ class WebAppTests(RegressionTestCase):
         self.assertIn('id="resultSortDirection"', template)
         self.assertIn('id="resultStatusBucketFilter"', template)
         self.assertIn('id="resultFilterSummary"', template)
+        self.assertIn('id="runBrowserSummary"', template)
+        self.assertIn('id="runBrowserDetail"', template)
         self.assertNotIn('[X] EXTRACT MAIL SIGILS', template)
         self.assertIn('Awaiting target specimen to build preview.', script)
         self.assertIn('const DRY_RUN_ON_MESSAGE =', script)
         self.assertIn('withActionLock(', script)
         self.assertIn('result-copy', script)
+        self.assertIn('new EventSource', script)
+        self.assertIn('renderRunBrowser', script)
         self.assertIn('initializeCollapsiblePanels()', script)
-        self.assertNotIn("els.form.addEventListener('keydown'", script)
+        self.assertIn("els.form.addEventListener('submit'", script)
         self.assertIn('.sr-only {', stylesheet)
         self.assertIn('.flag-fieldset {', stylesheet)
         self.assertIn('.command-buttons--sticky {', stylesheet)
         self.assertIn('.panel-toggle {', stylesheet)
+        self.assertIn('.record-card--selected {', stylesheet)
         self.assertIn('--background-scene: url(', stylesheet)
         self.assertIn('var(--background-scene)', stylesheet)
 
@@ -213,6 +218,60 @@ class WebAppTests(RegressionTestCase):
             second = json.loads(lines[1])
             self.assertEqual(first['type'], 'log')
             self.assertEqual(second['type'], 'event')
+
+    def test_event_stream_emits_snapshot_and_log_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(Path(tmpdir))
+            manager = app.config['CRAWL_MANAGER']
+            output_dir = Path(tmpdir) / 'live-record'
+            run = CrawlRun(
+                run_id='live-record',
+                payload={'target_url': 'https://example.com', 'target_specimen': 'https://example.com', 'mode': 'generic'},
+                output_dir=output_dir,
+                checkpoint_path=output_dir / 'checkpoint.json',
+                command=[sys.executable, os.path.join(REPO_ROOT, 'vampire.py')],
+                status='running',
+                status_detail='BEGIN CRAWL',
+                event_callback=manager._broadcast,
+            )
+            manager.current_run = run
+            with app.test_client() as client:
+                response = client.get('/api/events', buffered=False)
+                chunks = response.response
+                first = next(chunks).decode('utf-8')
+                self.assertIn('event: snapshot', first)
+                self.assertIn('"status": "running"', first)
+                run.ingest_log('Internal page: https://example.com/')
+                second = next(chunks).decode('utf-8')
+                self.assertIn('event: log', second)
+                self.assertIn('"line": "Internal page: https://example.com/"', second)
+                response.close()
+
+    def test_run_browser_lists_runs_and_diff_against_previous(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(Path(tmpdir))
+            older_dir = Path(tmpdir) / '20260503-example-generic'
+            newer_dir = Path(tmpdir) / '20260504-example-generic'
+            older_dir.mkdir()
+            newer_dir.mkdir()
+            (older_dir / 'internal.txt').write_text('https://example.com/\n', encoding='utf-8')
+            (newer_dir / 'internal.txt').write_text('https://example.com/\nhttps://example.com/new\n', encoding='utf-8')
+            (older_dir / 'stats.txt').write_text('visited=1\nfailures=0\n', encoding='utf-8')
+            (newer_dir / 'stats.txt').write_text('visited=2\nfailures=0\n', encoding='utf-8')
+            (older_dir / 'checkpoint.json').write_text(json.dumps({'main_url': 'https://example.com', 'mode': 'generic'}), encoding='utf-8')
+            (newer_dir / 'checkpoint.json').write_text(json.dumps({'main_url': 'https://example.com', 'mode': 'generic'}), encoding='utf-8')
+            with app.test_client() as client:
+                listing = client.get('/api/runs')
+                self.assertEqual(listing.status_code, 200)
+                browser = listing.get_json()
+                self.assertEqual(browser['selected_run_id'], '20260504-example-generic')
+                self.assertEqual(browser['runs'][0]['id'], '20260504-example-generic')
+                detail = client.get('/api/runs/20260504-example-generic')
+                self.assertEqual(detail.status_code, 200)
+                payload = detail.get_json()
+                self.assertEqual(payload['run_browser']['selected_run_id'], '20260504-example-generic')
+                self.assertEqual(payload['run_browser']['diff_against_previous']['against_run_id'], '20260503-example-generic')
+                self.assertGreaterEqual(payload['run_browser']['diff_against_previous']['summary']['added'], 1)
 
     def test_web_ui_temporal_mode_requires_explicit_baseline(self):
         with tempfile.TemporaryDirectory() as tmpdir:

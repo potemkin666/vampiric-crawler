@@ -1,6 +1,7 @@
 const state = {
   status: 'idle',
   timer: null,
+  eventSource: null,
   viewRunId: null,
   lastFeedKey: '',
   sortKey: 'discovery_time',
@@ -140,6 +141,8 @@ const els = {
   resultSourceFilter: document.getElementById('resultSourceFilter'),
   resultLedger: document.getElementById('resultLedger'),
   resultFilterSummary: document.getElementById('resultFilterSummary'),
+  runBrowserSummary: document.getElementById('runBrowserSummary'),
+  runBrowserDetail: document.getElementById('runBrowserDetail'),
 };
 
 function escapeHtml(value) {
@@ -395,25 +398,76 @@ function renderExports(data) {
   els.recordPath.textContent = data.output_dir ? `SEALED PATH // ${data.output_dir}` : '';
 }
 
-function renderRecords(data) {
-  const records = data.sealed_records || [];
-  els.sealedRecords.innerHTML = records.length
+function renderBuffers(data) {
+  els.liveFeed.textContent = (data.feed && data.feed.length) ? data.feed.join('\n') : 'Awaiting target acquisition…';
+  els.errorConsole.textContent = (data.errors && data.errors.length)
+    ? data.errors.join('\n')
+    : ((data.logs && data.logs.length) ? data.logs.slice(-18).join('\n') : 'No omens yet.');
+}
+
+function renderRunBrowser(data) {
+  const browser = data.run_browser || {};
+  const runs = browser.runs || [];
+  const selected = browser.selected || null;
+  const diff = browser.diff_against_previous || null;
+  els.runBrowserSummary.textContent = runs.length
+    ? `${runs.length} sealed record${runs.length === 1 ? '' : 's'} in the archive.`
+    : 'Awaiting sealed records.';
+  els.sealedRecords.innerHTML = runs.length
     ? [
       data.is_historical ? '<button type="button" class="terminal-button record-open" data-run-id="">> RETURN TO CURRENT RITE</button>' : '',
-      ...records.map((record) => `
-       <div class="record-card">
-         <div class="panel-title">${escapeHtml(record.status_message || record.status)}</div>
-         <strong>${escapeHtml(record.target_url || record.id)}</strong>
-         <div>${escapeHtml(record.mode || 'generic')} // ${escapeHtml(record.status || '')}</div>
-         <div>${escapeHtml(record.ended_at || '')}</div>
-         <div class="result-link-list">
-           <button type="button" class="terminal-button record-open" data-run-id="${escapeHtml(record.id || '')}">REOPEN RECORD</button>
-           ${(record.exports || []).map((item) => `<a class="result-link" href="${escapeHtml(item.href)}">${escapeHtml(item.kind)}</a>`).join(' ')}
-         </div>
-       </div>
+      ...runs.map((record) => `
+        <div class="record-card ${record.id === browser.selected_run_id ? 'record-card--selected' : ''}">
+          <div class="panel-title">${escapeHtml(record.status_message || record.status)}</div>
+          <strong>${escapeHtml(record.target_url || record.id)}</strong>
+          <div>${escapeHtml(record.mode_label || record.mode || 'generic')}</div>
+          <div>${escapeHtml(record.ended_at || record.started_at || '')}</div>
+          <div class="result-meta">
+            <span>visited=${escapeHtml(record.counts?.visited ?? 0)}</span>
+            <span>failures=${escapeHtml(record.counts?.failures ?? 0)}</span>
+            <span>links=${escapeHtml(record.counts?.links ?? 0)}</span>
+            <span>relics=${escapeHtml(record.counts?.relics ?? 0)}</span>
+          </div>
+          <div class="result-link-list">
+            <button type="button" class="terminal-button record-open" data-run-id="${escapeHtml(record.id || '')}">REOPEN RECORD</button>
+            ${(record.exports || []).filter((item) => ['timeline-jsonl', 'timeline-json', 'bundle'].includes(item.kind))
+              .map((item) => `<a class="result-link" href="${escapeHtml(item.href)}">${escapeHtml(item.kind)}</a>`).join(' ')}
+          </div>
+        </div>
       `),
     ].join('')
     : '<span class="empty-note">NO SEALED RECORDS YET</span>';
+  els.runBrowserDetail.innerHTML = selected
+    ? `
+      <article class="result-row">
+        <div class="result-row-header">
+          <strong>${escapeHtml(selected.target_url || selected.id)}</strong>
+          <span class="panel-title">${escapeHtml(selected.status_message || selected.status || '')}</span>
+        </div>
+        <div class="result-meta">
+          <span>mode=${escapeHtml(selected.mode_label || selected.mode || '')}</span>
+          <span>visited=${escapeHtml(selected.counts?.visited ?? 0)}</span>
+          <span>failures=${escapeHtml(selected.counts?.failures ?? 0)}</span>
+          <span>links=${escapeHtml(selected.counts?.links ?? 0)}</span>
+          <span>relics=${escapeHtml(selected.counts?.relics ?? 0)}</span>
+        </div>
+        <div class="result-actions">
+          <div class="result-link-list">
+            ${(selected.exports || []).map((item) => `<a class="result-link" href="${escapeHtml(item.href)}">${escapeHtml(item.label || item.kind)}</a>`).join(' ')}
+          </div>
+        </div>
+        ${diff ? `
+          <details class="result-trace" open>
+            <summary>DIFF AGAINST PREVIOUS // ${escapeHtml(diff.against_run_id || '')}</summary>
+            <div class="result-trace-grid">
+              <div><strong>SUMMARY</strong><div>added=${escapeHtml(diff.summary?.added ?? 0)} removed=${escapeHtml(diff.summary?.removed ?? 0)} changed=${escapeHtml(diff.summary?.changed ?? 0)}</div></div>
+              <div><strong>CHANGES</strong><div>${(diff.items || []).length ? diff.items.map((item) => `<div>${escapeHtml(item)}</div>`).join('') : 'No prior diff lines.'}</div></div>
+            </div>
+          </details>
+        ` : '<div class="panel-match-state">No older sealed record is available for diff.</div>'}
+      </article>
+    `
+    : '<span class="empty-note">NO SEALED RECORD SELECTED</span>';
   els.sealedRecords.querySelectorAll('.record-open').forEach((button) => {
     button.addEventListener('click', async () => {
       const runId = button.dataset.runId || '';
@@ -425,6 +479,10 @@ function renderRecords(data) {
       await openSealedRecord(runId);
     });
   });
+}
+
+function renderRecords(data) {
+  renderRunBrowser(data);
 }
 
 function renderPauseState(data) {
@@ -600,10 +658,7 @@ function renderState(data) {
   els.statusMessage.textContent = data.status_message || 'THE CRAWLER SLEEPS';
   els.asciiMeter.textContent = buildMeter(data);
   renderSummary(data);
-  els.liveFeed.textContent = (data.feed && data.feed.length) ? data.feed.join('\n') : 'Awaiting target acquisition…';
-  els.errorConsole.textContent = (data.errors && data.errors.length)
-    ? data.errors.join('\n')
-    : ((data.logs && data.logs.length) ? data.logs.slice(-18).join('\n') : 'No omens yet.');
+  renderBuffers(data);
   renderPauseState(data);
   renderQueue(data);
   renderRobots(data);
@@ -639,6 +694,154 @@ async function refreshState() {
   } catch (error) {
     els.errorConsole.textContent = String(error.message || error);
   }
+}
+
+function pushLimited(list, value, limit) {
+  const next = [...(list || []), value];
+  return next.slice(-limit);
+}
+
+function ensureStreamState(runId) {
+  if (!state.lastState) return false;
+  if (state.viewRunId) return state.viewRunId === runId;
+  if (!state.lastState.id || !runId) return true;
+  return state.lastState.id === runId;
+}
+
+function refreshDerivedSummary(data) {
+  const rows = data.result_rows || [];
+  const completedCount = rows.filter((row) => ['completed', 'failed', 'skipped'].includes(row.state)).length;
+  const failureCount = rows.filter((row) => ['failed', 'skipped'].includes(row.state)).length;
+  data.summary = data.summary || {};
+  data.summary.visited = Math.max(Number(data.summary.visited || 0), completedCount);
+  data.summary.failures = Math.max(Number(data.summary.failures || 0), failureCount);
+}
+
+function upsertStreamResultRow(data, row) {
+  const rows = [...(data.result_rows || [])];
+  const existingIndex = rows.findIndex((item) => item.url === row.url);
+  const nextRow = {
+    ...(existingIndex >= 0 ? rows[existingIndex] : {}),
+    ...row,
+  };
+  nextRow.redirect_chain = nextRow.redirect_chain || [];
+  nextRow.discovery_path = nextRow.discovery_path || [nextRow.source_page, nextRow.url].filter(Boolean);
+  if (existingIndex >= 0) {
+    rows.splice(existingIndex, 1, nextRow);
+  } else {
+    rows.push(nextRow);
+  }
+  data.result_rows = rows;
+  refreshDerivedSummary(data);
+}
+
+function applyStreamEvent(message) {
+  const runId = message.run_id || '';
+  const payload = message.payload || {};
+  if (!ensureStreamState(runId)) return;
+  if (!state.lastState) {
+    refreshState();
+    return;
+  }
+  if (payload.line) {
+    state.lastState.logs = pushLimited(state.lastState.logs, payload.line, 500);
+    if ((payload.channels || []).includes('feed')) {
+      state.lastState.feed = pushLimited(state.lastState.feed, payload.line, 250);
+    }
+    if ((payload.channels || []).includes('errors')) {
+      state.lastState.errors = pushLimited(state.lastState.errors, payload.line, 150);
+    }
+    renderBuffers(state.lastState);
+    return;
+  }
+  switch (message.event_type || payload.event_type) {
+    case 'queue':
+      state.lastState.queue = payload;
+      renderQueue(state.lastState);
+      return;
+    case 'result':
+      upsertStreamResultRow(state.lastState, payload);
+      els.asciiMeter.textContent = buildMeter(state.lastState);
+      renderSummary(state.lastState);
+      renderResultLedger(state.lastState);
+      return;
+    case 'robots':
+      state.lastState.robots_details = payload;
+      renderRobots(state.lastState);
+      return;
+    case 'sitemap':
+      state.lastState.sitemap_details = payload;
+      renderSitemaps(state.lastState);
+      return;
+    case 'error': {
+      const parts = [payload.message || 'The rite failed.'];
+      if (payload.category) parts.push(`category=${payload.category}`);
+      if (payload.status_code) parts.push(`status=${payload.status_code}`);
+      if (payload.url) parts.push(`url=${payload.url}`);
+      state.lastState.errors = pushLimited(state.lastState.errors, parts.join(' | '), 150);
+      state.lastState.summary = state.lastState.summary || {};
+      state.lastState.summary.failures = Number(state.lastState.summary.failures || 0) + 1;
+      els.asciiMeter.textContent = buildMeter(state.lastState);
+      renderSummary(state.lastState);
+      renderBuffers(state.lastState);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function stopRealtime() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  if (state.timer) {
+    clearInterval(state.timer);
+    state.timer = null;
+  }
+}
+
+function startFallbackPolling() {
+  if (state.timer || state.eventSource) return;
+  state.timer = setInterval(refreshState, 1500);
+}
+
+function startRealtime() {
+  if (typeof window.EventSource !== 'function') {
+    startFallbackPolling();
+    return;
+  }
+  stopRealtime();
+  const source = new EventSource('/api/events');
+  state.eventSource = source;
+  source.addEventListener('snapshot', (event) => {
+    const data = JSON.parse(event.data || '{}');
+    if (state.viewRunId && !data.is_historical && state.viewRunId !== data.id) {
+      return;
+    }
+    renderState(data);
+  });
+  source.addEventListener('log', (event) => {
+    applyStreamEvent(JSON.parse(event.data || '{}'));
+  });
+  source.addEventListener('crawl-event', (event) => {
+    const message = JSON.parse(event.data || '{}');
+    applyStreamEvent({
+      run_id: message.run_id,
+      event_type: message.payload?.event_type,
+      payload: message.payload?.payload || {},
+    });
+  });
+  source.addEventListener('status', () => {
+    if (!state.viewRunId) {
+      refreshState();
+    }
+  });
+  source.onerror = () => {
+    stopRealtime();
+    startFallbackPolling();
+  };
 }
 
 async function openSealedRecord(runId) {
@@ -831,6 +1034,10 @@ function applyResultFilter() {
 ['input', 'change'].forEach((eventName) => {
   els.form.addEventListener(eventName, renderCommandPreview);
 });
+els.form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  beginCrawl();
+});
 els.crawlMode.addEventListener('change', syncModeControls);
 els.resultSearch.addEventListener('input', () => {
   if (state.lastState) {
@@ -869,7 +1076,7 @@ initializeCollapsiblePanels();
 syncCollapsiblePanelsToViewport();
 refreshState();
 refreshSetupDiagnostics();
-state.timer = setInterval(refreshState, 1500);
+startRealtime();
 window.addEventListener('resize', () => {
   clearTimeout(panelResizeTimer);
   panelResizeTimer = setTimeout(() => {
