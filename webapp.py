@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from flask import Flask, abort, jsonify, render_template, request, send_file
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file, stream_with_context
 
 from core.autopsy import (
     ANALYSIS_DATASET_NAMES,
@@ -29,7 +30,9 @@ from core.autopsy import (
     build_site_anatomy,
     build_structured_snapshot,
     finalize_genealogy,
+    load_previous_snapshot,
     render_autopsy_markdown,
+    snapshot_exists,
     write_manifest_file,
     write_structured_snapshot_file,
 )
@@ -39,6 +42,7 @@ from core.modes import (
     MODE_DEFINITIONS,
     PRESET_DEFINITIONS,
     RITUAL_CHAIN_DEFINITIONS,
+    build_temporal_diffs,
     coerce_mode,
     coerce_preset,
     coerce_ritual_chain,
@@ -84,6 +88,10 @@ STATUS_MESSAGES = {
     'empty': 'THE ARCHIVE IS SILENT',
     'stopping': 'HALT RITE',
 }
+TIMELINE_JSONL_NAME = 'event-timeline.jsonl'
+TIMELINE_JSON_NAME = 'event-timeline.json'
+RENDERED_EVIDENCE_NAME = 'rendered-evidence.json'
+SSE_KEEPALIVE_SECONDS = 15
 
 
 def default_queue_snapshot() -> dict[str, dict[str, Any]]:
@@ -137,6 +145,54 @@ def read_stats(path: Path) -> dict[str, Any]:
             except ValueError:
                 stats[key] = value
     return stats
+
+
+def read_json_lines(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    entries = []
+    with path.open('r', encoding='utf-8') as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                entries.append(payload)
+    return entries
+
+
+def materialize_timeline_json(output_dir: Path) -> Path | None:
+    jsonl_path = output_dir / TIMELINE_JSONL_NAME
+    if not jsonl_path.exists():
+        return None
+    json_path = output_dir / TIMELINE_JSON_NAME
+    with jsonl_path.open('r', encoding='utf-8') as source, json_path.open('w', encoding='utf-8') as target:
+        target.write('[\n')
+        first = True
+        for raw_line in source:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if not first:
+                target.write(',\n')
+            target.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            first = False
+        target.write('\n]\n')
+    return json_path
+
+
+def sse_frame(event_name: str, payload: dict[str, Any]) -> str:
+    return f'event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n'
 
 
 def parse_redirects(items: list[str]) -> dict[str, list[str]]:
@@ -350,6 +406,29 @@ class CrawlRun:
     queue_snapshot: dict[str, dict[str, Any]] = field(default_factory=default_queue_snapshot)
     robots_metadata: dict[str, Any] = field(default_factory=default_robots_metadata)
     sitemap_metadata: dict[str, Any] = field(default_factory=default_sitemap_metadata)
+    event_callback: Any = None
+
+    def __post_init__(self) -> None:
+        self.timeline_jsonl_path = self.output_dir / TIMELINE_JSONL_NAME
+        self.timeline_json_path = self.output_dir / TIMELINE_JSON_NAME
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _append_timeline_entry(self, entry_type: str, payload: dict[str, Any]) -> None:
+        record = {
+            'timestamp': now_iso(),
+            'type': entry_type,
+            'payload': payload,
+        }
+        with self.timeline_jsonl_path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+    def publish_ui_event(self, event_name: str, payload: dict[str, Any]) -> None:
+        if not callable(self.event_callback):
+            return
+        self.event_callback(event_name, {
+            'run_id': self.run_id,
+            'payload': payload,
+        })
 
     def ingest_log(self, raw_line: str) -> None:
         line = strip_ansi(raw_line)
@@ -361,6 +440,7 @@ class CrawlRun:
         with self.lock:
             self.logs.append(line)
             lowered = line.lower()
+            channels = ['logs']
             if (
                 'internal page:' in lowered
                 or 'external page:' in lowered
@@ -370,6 +450,7 @@ class CrawlRun:
                 or 'harvest summary' in lowered
             ):
                 self.feed.append(line)
+                channels.append('feed')
             if (
                 'failed to feed' in lowered
                 or 'rejected by the prey' in lowered
@@ -379,6 +460,15 @@ class CrawlRun:
                 or 'disabled' in lowered
             ):
                 self.errors.append(line)
+                channels.append('errors')
+        self._append_timeline_entry('log', {
+            'line': line,
+            'channels': channels,
+        })
+        self.publish_ui_event('log', {
+            'line': line,
+            'channels': channels,
+        })
 
     def ingest_event(self, payload: str) -> None:
         try:
@@ -432,6 +522,14 @@ class CrawlRun:
                 if url:
                     parts.append(f'url={url}')
                 self.errors.append(' | '.join(parts))
+        self._append_timeline_entry('event', {
+            'event_type': str(event_type or ''),
+            'payload': data if isinstance(data, dict) else {},
+        })
+        self.publish_ui_event('crawl-event', {
+            'event_type': str(event_type or ''),
+            'payload': data if isinstance(data, dict) else {},
+        })
 
     def snapshot(self, history: list[dict[str, Any]]) -> dict[str, Any]:
         datasets, stats = collect_run_artifacts(self.output_dir, self.checkpoint_path)
@@ -656,6 +754,70 @@ def build_saved_run_snapshot(run_id: str, output_dir: Path, checkpoint_path: Pat
     }
 
 
+def build_run_browser_entry(
+    run_id: str,
+    output_dir: Path,
+    checkpoint_path: Path,
+    history_entry: dict[str, Any] | None = None,
+    *,
+    current_run: CrawlRun | None = None,
+) -> dict[str, Any]:
+    payload = current_run.payload if current_run else load_saved_run_payload(output_dir, checkpoint_path, history_entry)
+    datasets, stats = collect_run_artifacts(output_dir, checkpoint_path)
+    summary = build_summary(payload, datasets, stats)
+    exports = build_exports(output_dir, run_id=run_id)
+    status = str((history_entry or {}).get('status') or (current_run.status if current_run else ('complete' if any(datasets.values()) or stats else 'empty')))
+    ended_at = (history_entry or {}).get('ended_at') or (current_run.ended_at if current_run else None)
+    started_at = current_run.started_at if current_run else None
+    return {
+        'id': run_id,
+        'target_url': payload.get('target_url', ''),
+        'mode': coerce_mode(payload.get('mode')),
+        'mode_label': mode_label(payload.get('mode', 'generic')),
+        'status': status,
+        'status_message': STATUS_MESSAGES.get(status, STATUS_MESSAGES['idle']),
+        'ended_at': ended_at,
+        'started_at': started_at,
+        'output_dir': str(output_dir),
+        'state_href': f'/api/runs/{run_id}',
+        'exports': exports,
+        'counts': {
+            'visited': int(summary.get('visited', 0) or 0),
+            'failures': int(summary.get('failures', 0) or 0),
+            'links': int(summary.get('links_unearthed', 0) or 0),
+            'relics': int(summary.get('relics_found', 0) or 0),
+        },
+        'is_current': bool(current_run),
+    }
+
+
+def build_run_diff(selected_run_id: str, previous_run_id: str, runs_root: Path) -> dict[str, Any]:
+    selected_dir = runs_root / selected_run_id
+    previous_dir = runs_root / previous_run_id
+    if not snapshot_exists(str(selected_dir), DATASET_FILES) or not snapshot_exists(str(previous_dir), DATASET_FILES):
+        return {
+            'against_run_id': previous_run_id,
+            'summary': {'added': 0, 'removed': 0, 'changed': 0},
+            'items': [],
+        }
+    selected_snapshot = load_previous_snapshot(str(selected_dir), DATASET_FILES)
+    previous_snapshot = load_previous_snapshot(str(previous_dir), DATASET_FILES)
+    diff_lines = sorted(build_temporal_diffs(previous_snapshot, selected_snapshot))
+    summary = {'added': 0, 'removed': 0, 'changed': 0}
+    for line in diff_lines:
+        if ' change=added ' in f' {line} ':
+            summary['added'] += 1
+        elif ' change=removed ' in f' {line} ':
+            summary['removed'] += 1
+        else:
+            summary['changed'] += 1
+    return {
+        'against_run_id': previous_run_id,
+        'summary': summary,
+        'items': diff_lines[:16],
+    }
+
+
 def build_result_rows(
     records: dict[str, dict[str, Any]],
     redirect_lines: list[str] | None = None,
@@ -827,6 +989,9 @@ def build_exports(output_dir: Path, run_id: str | None = None) -> list[dict[str,
         ('autopsy-json', 'AUTOPSY JSON', output_dir / 'autopsy.json'),
         ('autopsy-md', 'AUTOPSY MD', output_dir / 'autopsy.md'),
         ('manifest-json', 'CRAWL MANIFEST', output_dir / 'crawl-manifest.json'),
+        ('rendered-evidence', 'RENDERED EVIDENCE', output_dir / RENDERED_EVIDENCE_NAME),
+        ('timeline-jsonl', 'EVENT TIMELINE JSONL', output_dir / TIMELINE_JSONL_NAME),
+        ('timeline-json', 'EVENT TIMELINE JSON', output_dir / TIMELINE_JSON_NAME),
         ('bundle', 'EXPORT BUNDLE', output_dir / 'sealed-bundle.zip'),
     )
     href_prefix = f'/api/runs/{run_id}/exports' if run_id else '/api/exports'
@@ -840,6 +1005,7 @@ def build_exports(output_dir: Path, run_id: str | None = None) -> list[dict[str,
 def ensure_exports(run: CrawlRun) -> None:
     if run.exports_ready:
         return
+    materialize_timeline_json(run.output_dir)
     datasets, stats = collect_run_artifacts(run.output_dir, run.checkpoint_path)
     runtime_config = RuntimeConfig.from_mapping(run.payload)
     payload = {name: values for name, values in datasets.items() if values}
@@ -914,10 +1080,10 @@ def ensure_exports(run: CrawlRun) -> None:
     )
     bundle_path = run.output_dir / 'sealed-bundle.zip'
     with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        for child in sorted(run.output_dir.iterdir()):
-            if child.name == bundle_path.name:
+        for child in sorted(run.output_dir.rglob('*')):
+            if child == bundle_path or child.is_dir():
                 continue
-            archive.write(child, arcname=child.name)
+            archive.write(child, arcname=str(child.relative_to(run.output_dir)))
         archive.writestr('crawl-config.json', json.dumps({
             'payload': run.payload,
             'command': run.command,
@@ -982,6 +1148,86 @@ class CrawlManager:
         self._lock = threading.Lock()
         self.current_run: CrawlRun | None = None
         self.history: deque[dict[str, Any]] = deque(maxlen=8)
+        self._event_subscribers: set[queue.Queue[dict[str, Any]]] = set()
+
+    def subscribe_events(self) -> queue.Queue[dict[str, Any]]:
+        subscriber: queue.Queue[dict[str, Any]] = queue.Queue()
+        with self._lock:
+            self._event_subscribers.add(subscriber)
+        subscriber.put({'event': 'snapshot', 'data': self.state()})
+        return subscriber
+
+    def unsubscribe_events(self, subscriber: queue.Queue[dict[str, Any]]) -> None:
+        with self._lock:
+            self._event_subscribers.discard(subscriber)
+
+    def _broadcast(self, event_name: str, payload: dict[str, Any]) -> None:
+        with self._lock:
+            subscribers = list(self._event_subscribers)
+        dead = []
+        message = {'event': event_name, 'data': payload}
+        for subscriber in subscribers:
+            try:
+                subscriber.put_nowait(message)
+            except Exception:
+                dead.append(subscriber)
+        if dead:
+            with self._lock:
+                for subscriber in dead:
+                    self._event_subscribers.discard(subscriber)
+
+    def _broadcast_snapshot(self) -> None:
+        self._broadcast('snapshot', self.state())
+
+    def list_runs(self) -> list[dict[str, Any]]:
+        history_map = {str(item.get('id') or ''): item for item in self.history if item.get('id')}
+        entries: dict[str, dict[str, Any]] = {}
+        if self.current_run:
+            entries[self.current_run.run_id] = build_run_browser_entry(
+                self.current_run.run_id,
+                self.current_run.output_dir,
+                self.current_run.checkpoint_path,
+                history_map.get(self.current_run.run_id),
+                current_run=self.current_run,
+            )
+        for child in sorted(self.runs_root.iterdir(), reverse=True):
+            if not child.is_dir():
+                continue
+            run_id = child.name
+            if run_id in entries:
+                continue
+            checkpoint_path = child / 'checkpoint.json'
+            entries[run_id] = build_run_browser_entry(run_id, child, checkpoint_path, history_map.get(run_id))
+        return sorted(
+            entries.values(),
+            key=lambda item: (1 if item.get('is_current') else 0, item.get('ended_at') or '', item.get('id') or ''),
+            reverse=True,
+        )
+
+    def build_run_browser(self, selected_run_id: str | None = None) -> dict[str, Any]:
+        runs = self.list_runs()
+        if not runs:
+            return {'runs': [], 'selected_run_id': None, 'selected': None, 'diff_against_previous': None}
+        run_ids = [item['id'] for item in runs]
+        if selected_run_id not in run_ids:
+            selected_run_id = run_ids[0]
+        selected = next((item for item in runs if item['id'] == selected_run_id), None)
+        diff = None
+        if selected:
+            index = run_ids.index(selected_run_id)
+            if index + 1 < len(run_ids):
+                diff = build_run_diff(selected_run_id, run_ids[index + 1], self.runs_root)
+        return {
+            'runs': runs,
+            'selected_run_id': selected_run_id,
+            'selected': selected,
+            'diff_against_previous': diff,
+        }
+
+    def _attach_run_browser(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        selected_run_id = snapshot.get('id') if snapshot.get('is_historical') else None
+        snapshot['run_browser'] = self.build_run_browser(selected_run_id)
+        return snapshot
 
     def start(self, payload: dict[str, Any]) -> CrawlRun:
         with self._lock:
@@ -1018,10 +1264,12 @@ class CrawlManager:
                 process=process,
                 status='running',
                 status_detail='BEGIN CRAWL',
+                event_callback=self._broadcast,
             )
             self.current_run = run
             thread = threading.Thread(target=self._monitor_run, args=(run,), daemon=True)
             thread.start()
+            self._broadcast_snapshot()
             return run
 
     def _monitor_run(self, run: CrawlRun) -> None:
@@ -1057,6 +1305,12 @@ class CrawlManager:
             'state_href': f'/api/runs/{run.run_id}',
             'exports': build_exports(run.output_dir, run_id=run.run_id),
         })
+        self._broadcast('status', {
+            'run_id': run.run_id,
+            'status': run.status,
+            'status_detail': run.status_detail,
+        })
+        self._broadcast_snapshot()
 
     def pause(self) -> CrawlRun:
         run = self._active_run()
@@ -1066,6 +1320,7 @@ class CrawlManager:
         run.process.send_signal(signal.SIGSTOP)
         run.status = 'paused'
         run.status_detail = 'PAUSE DESCENT'
+        self._broadcast_snapshot()
         return run
 
     def resume(self) -> CrawlRun:
@@ -1078,6 +1333,7 @@ class CrawlManager:
         run.process.send_signal(signal.SIGCONT)
         run.status = 'running'
         run.status_detail = 'DESCENT IN PROGRESS'
+        self._broadcast_snapshot()
         return run
 
     def stop(self) -> CrawlRun:
@@ -1087,12 +1343,13 @@ class CrawlManager:
         run.status = 'stopping'
         run.status_detail = 'HALT RITE'
         run.process.send_signal(signal.SIGINT)
+        self._broadcast_snapshot()
         return run
 
     def state(self) -> dict[str, Any]:
         run = self.current_run
         if run is None:
-            return {
+            return self._attach_run_browser({
                 'id': None,
                 'status': 'idle',
                 'status_message': STATUS_MESSAGES['idle'],
@@ -1122,10 +1379,10 @@ class CrawlManager:
                 'can_pause': False,
                 'can_resume': False,
                 'can_stop': False,
-            }
+            })
         if run.status == 'complete':
             ensure_exports(run)
-        return run.snapshot(list(self.history))
+        return self._attach_run_browser(run.snapshot(list(self.history)))
 
     def export_path(self, kind: str) -> Path:
         run = self.current_run
@@ -1142,7 +1399,7 @@ class CrawlManager:
         history_entry = next((item for item in history if item.get('id') == run_id), None)
         output_dir = self._run_dir(run_id, history_entry)
         checkpoint_path = output_dir / 'checkpoint.json'
-        return build_saved_run_snapshot(run_id, output_dir, checkpoint_path, history, history_entry)
+        return self._attach_run_browser(build_saved_run_snapshot(run_id, output_dir, checkpoint_path, history, history_entry))
 
     def export_path_for_run(self, run_id: str, kind: str) -> Path:
         if self.current_run and self.current_run.run_id == run_id:
@@ -1159,6 +1416,9 @@ class CrawlManager:
             'autopsy-json': output_dir / 'autopsy.json',
             'autopsy-md': output_dir / 'autopsy.md',
             'manifest-json': output_dir / 'crawl-manifest.json',
+            'rendered-evidence': output_dir / RENDERED_EVIDENCE_NAME,
+            'timeline-jsonl': output_dir / TIMELINE_JSONL_NAME,
+            'timeline-json': output_dir / TIMELINE_JSON_NAME,
             'bundle': output_dir / 'sealed-bundle.zip',
         }
         path = mapping.get(kind)
@@ -1211,6 +1471,29 @@ def create_app(runs_root: Path | None = None) -> Flask:
     @app.get('/api/state')
     def state() -> Any:
         return jsonify(app.config['CRAWL_MANAGER'].state())
+
+    @app.get('/api/events')
+    def events() -> Response:
+        manager: CrawlManager = app.config['CRAWL_MANAGER']
+        subscriber = manager.subscribe_events()
+
+        @stream_with_context
+        def generate() -> Any:
+            try:
+                while True:
+                    try:
+                        message = subscriber.get(timeout=SSE_KEEPALIVE_SECONDS)
+                    except queue.Empty:
+                        yield ': keepalive\n\n'
+                        continue
+                    yield sse_frame(str(message.get('event') or 'message'), message.get('data') or {})
+            finally:
+                manager.unsubscribe_events(subscriber)
+
+        response = Response(generate(), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        return response
 
     @app.post('/api/preview')
     def preview() -> Any:
@@ -1283,6 +1566,10 @@ def create_app(runs_root: Path | None = None) -> Flask:
         except FileNotFoundError:
             abort(404)
         return jsonify(snapshot)
+
+    @app.get('/api/runs')
+    def runs() -> Any:
+        return jsonify(app.config['CRAWL_MANAGER'].build_run_browser())
 
     @app.get('/api/runs/<run_id>/exports/<kind>')
     def run_export(run_id: str, kind: str) -> Any:

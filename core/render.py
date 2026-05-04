@@ -1,15 +1,24 @@
 """Optional Playwright-backed JavaScript rendering."""
 import atexit
+import hashlib
+import json
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
 class RenderResult(object):
     """Rendered page content plus extra discovered URLs."""
 
-    def __init__(self, html='', urls=None):
+    def __init__(self, html='', urls=None, dom_sha256='', screenshot_path='', metadata_path='', final_url='', metadata=None):
         self.html = html or ''
         self.urls = set(urls or ())
+        self.dom_sha256 = dom_sha256 or ''
+        self.screenshot_path = screenshot_path or ''
+        self.metadata_path = metadata_path or ''
+        self.final_url = final_url or ''
+        self.metadata = dict(metadata or {})
 
 
 _playwright_lock = threading.Lock()
@@ -23,7 +32,7 @@ COMMON_RENDER_SELECTORS = (
 )
 
 
-def render_page(url, timeout=8, headers=None, cookie=None, user_agent=None):
+def render_page(url, timeout=8, headers=None, cookie=None, user_agent=None, evidence_dir=None, evidence_prefix=None):
     """Render *url* in a headless browser and return a :class:`RenderResult`."""
     browser = _get_browser()
     context_kwargs = {
@@ -39,17 +48,63 @@ def render_page(url, timeout=8, headers=None, cookie=None, user_agent=None):
         page = context.new_page()
         discovered_urls = set()
         page.on('response', lambda response: discovered_urls.add(response.url))
-        page.goto(url, wait_until='networkidle', timeout=max(int(float(timeout or 8) * 1000), 1000))
+        response = page.goto(url, wait_until='networkidle', timeout=max(int(float(timeout or 8) * 1000), 1000))
         html = page.content()
+        dom_sha256 = hashlib.sha256(html.encode('utf-8', 'ignore')).hexdigest() if html else ''
         selector = ', '.join(COMMON_RENDER_SELECTORS)
         dom_urls = page.eval_on_selector_all(
             selector,
             'elements => elements.map(el => el.href || el.src || el.action).filter(Boolean)',
         )
         discovered_urls.update(dom_urls or [])
-        return RenderResult(html=html, urls=discovered_urls)
+        final_url = getattr(response, 'url', '') or url
+        metadata = {
+            'requested_url': url,
+            'final_url': final_url,
+            'captured_at': datetime.now(timezone.utc).isoformat(),
+            'dom_sha256': dom_sha256,
+            'html_length': len(html or ''),
+            'discovered_urls': sorted(discovered_urls),
+        }
+        screenshot_bytes = b''
+        if hasattr(page, 'screenshot'):
+            screenshot_bytes = page.screenshot(full_page=True, type='png') or b''
+        screenshot_path = ''
+        metadata_path = ''
+        if evidence_dir:
+            evidence_root = Path(evidence_dir)
+            evidence_root.mkdir(parents=True, exist_ok=True)
+            stem = _evidence_stem(evidence_prefix or final_url or url)
+            if screenshot_bytes:
+                screenshot_file = evidence_root / f'{stem}.png'
+                screenshot_file.write_bytes(screenshot_bytes)
+                screenshot_path = str(screenshot_file)
+            metadata_file = evidence_root / f'{stem}.json'
+            metadata.update({
+                'screenshot_path': screenshot_path,
+                'metadata_path': str(metadata_file),
+            })
+            metadata_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding='utf-8')
+            metadata_path = str(metadata_file)
+        return RenderResult(
+            html=html,
+            urls=discovered_urls,
+            dom_sha256=dom_sha256,
+            screenshot_path=screenshot_path,
+            metadata_path=metadata_path,
+            final_url=final_url,
+            metadata=metadata,
+        )
     finally:
         context.close()
+
+
+def _evidence_stem(value):
+    parsed = urlsplit(str(value or 'rendered-page'))
+    base = parsed.netloc or parsed.path or 'rendered-page'
+    safe = ''.join(char if char.isalnum() else '-' for char in base.lower()).strip('-') or 'rendered-page'
+    digest = hashlib.sha256(str(value or '').encode('utf-8', 'ignore')).hexdigest()[:12]
+    return f'{safe}-{digest}'
 
 
 def _apply_cookie_header(context, url, cookie_header):

@@ -181,11 +181,20 @@ class ExtractorTests(RegressionTestCase):
             self.assertIn((('secret', 'value'), 'TOKEN', 'https://example.com'), sets['bad_intel'])
 
     def test_render_page_collects_dom_and_network_urls(self):
-        with patch('core.render._get_browser', return_value=FakeBrowser()):
-            rendered = render.render_page('https://example.com', cookie='session=abc')
-        self.assertIn('rendered-only', rendered.html)
-        self.assertIn('https://example.com/rendered-only', rendered.urls)
-        self.assertIn('https://example.com/graphql', rendered.urls)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('core.render._get_browser', return_value=FakeBrowser()):
+                rendered = render.render_page('https://example.com', cookie='session=abc', evidence_dir=tmpdir)
+            self.assertIn('rendered-only', rendered.html)
+            self.assertIn('https://example.com/rendered-only', rendered.urls)
+            self.assertIn('https://example.com/graphql', rendered.urls)
+            self.assertTrue(rendered.dom_sha256)
+            self.assertTrue(rendered.screenshot_path.endswith('.png'))
+            self.assertTrue(os.path.exists(rendered.screenshot_path))
+            self.assertTrue(rendered.metadata_path.endswith('.json'))
+            with open(rendered.metadata_path, 'r', encoding='utf-8') as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload['requested_url'], 'https://example.com')
+            self.assertEqual(payload['dom_sha256'], rendered.dom_sha256)
 
     def test_politeness_controller_records_retry_after_backoff(self):
         controller = PolitenessController(base_delay=0, host_concurrency=1)
