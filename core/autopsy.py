@@ -25,6 +25,7 @@ STATIC_EXTS = ('.js', '.css', '.map', '.png', '.jpg', '.jpeg', '.gif', '.svg', '
 TRUST_RE = re.compile(r'(?:github|discord|slack|trustpilot|statuspage|linkedin|twitter|x\.com|facebook|docs|privacy|terms)', re.I)
 ANALYTICS_RE = re.compile(r'(?:google-analytics|googletagmanager|segment|mixpanel|amplitude|gtm-|ua-\d+|ga4)', re.I)
 CDN_RE = re.compile(r'(?:cloudfront\.net|amazonaws\.com|storage\.googleapis\.com|blob\.core\.windows\.net|cdn\.|fastly|akamai)', re.I)
+HASH_CHUNK_SIZE = 65536
 
 
 def record_artifact_discovery(
@@ -511,7 +512,7 @@ def _hash_output_dir(output_dir: str) -> dict[str, dict[str, object]]:
 def _hash_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, 'rb') as handle:
-        for chunk in iter(lambda: handle.read(65536), b''):
+        for chunk in iter(lambda: handle.read(HASH_CHUNK_SIZE), b''):
             digest.update(chunk)
     return digest.hexdigest()
 

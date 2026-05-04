@@ -136,6 +136,7 @@ def read_stats(path: Path) -> dict[str, Any]:
 
 
 def parse_redirects(items: list[str]) -> dict[str, list[str]]:
+    """Return {source_url: [redirect trail...]} parsed from `url => a -> b` lines."""
     mapping: dict[str, list[str]] = {}
     for item in items:
         source, _, trail = item.partition(' => ')
@@ -1028,10 +1029,10 @@ def create_app(runs_root: Path | None = None) -> Flask:
 
     @app.route('/api/setup-check', methods=['GET', 'POST'])
     def setup_check() -> Any:
-        payload = request.get_json(silent=True) or {}
-        proxy = payload.get('proxy') if request.method == 'POST' else request.args.get('proxy')
-        output_dir = payload.get('output_dir') if request.method == 'POST' else request.args.get('output_dir')
-        diagnostics = build_setup_diagnostics(Path(output_dir) if output_dir else RUNS_ROOT, proxy=proxy)
+        try:
+            diagnostics = build_setup_diagnostics(RUNS_ROOT)
+        except Exception as exc:
+            return error_response('First-run diagnostics failed.', 500, exc)
         return jsonify(diagnostics)
 
     @app.post('/api/crawl')

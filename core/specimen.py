@@ -182,7 +182,7 @@ def setup_status(output_dir: str | None = None, proxy: object | None = None) -> 
     except Exception as exc:
         browser = f'missing: {exc}'
         render_smoke = f'missing: {exc}'
-    output_path = Path(output_dir).expanduser() if output_dir else Path.cwd()
+    output_path = _coerce_output_dir_for_check(output_dir)
     output_dir_status = 'ok'
     try:
         output_path.mkdir(parents=True, exist_ok=True)
@@ -201,11 +201,14 @@ def setup_status(output_dir: str | None = None, proxy: object | None = None) -> 
     if proxy_candidate:
         try:
             from core.utils import is_good_proxy
-            normalized_proxy = proxy_candidate.replace('http://', '').replace('https://', '')
-            if is_good_proxy({'http': f'http://{normalized_proxy}', 'https': f'http://{normalized_proxy}'}):
-                proxy_status = {'status': 'ok', 'detail': normalized_proxy}
+            normalized_proxy = proxy_candidate.strip()
+            if '://' not in normalized_proxy:
+                normalized_proxy = f'http://{normalized_proxy}'
+            scheme, _, remainder = normalized_proxy.partition('://')
+            if is_good_proxy({'http': f'{scheme}://{remainder}', 'https': f'{scheme}://{remainder}'}):
+                proxy_status = {'status': 'ok', 'detail': remainder}
             else:
-                proxy_status = {'status': 'missing', 'detail': f'Proxy unreachable: {normalized_proxy}'}
+                proxy_status = {'status': 'missing', 'detail': f'Proxy unreachable: {remainder}'}
         except Exception as exc:
             proxy_status = {'status': 'missing', 'detail': f'Proxy check failed: {exc}'}
     return {
@@ -217,6 +220,15 @@ def setup_status(output_dir: str | None = None, proxy: object | None = None) -> 
         'install_hint': 'python -m pip install -r requirements.txt',
         'browser_hint': 'python -m playwright install chromium',
     }
+
+
+def _coerce_output_dir_for_check(output_dir: str | None) -> Path:
+    if not output_dir:
+        return Path.cwd()
+    candidate = str(output_dir).strip()
+    if '\x00' in candidate:
+        raise ValueError('Output directory contains an invalid null byte.')
+    return Path(candidate).expanduser().resolve(strict=False)
 
 
 def _classify_type(raw: str, explicit: str, local_path: str) -> str:
