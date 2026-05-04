@@ -121,6 +121,10 @@
               <span>COFFIN TIMEOUT (s)</span>
               <input id="timeout" name="timeout" type="number" min="1" step="1" value="8">
             </label>
+            <label>
+              <span title="Optional extra hidden-path tokens, separated by commas or spaces.">SHADOW WORD EXTENSIONS</span>
+              <input id="hiddenWords" name="hiddenWords" type="text" placeholder="vault, admin-old, staging">
+            </label>
           </div>
           <div class="mode-hint" id="modeHint">GENERIC HUNT // Balanced reconnaissance across pages, forms, scripts, and relics.</div>
           <pre class="terminal-log selectable" id="configPreview">Awaiting preview…</pre>
@@ -194,9 +198,9 @@
         </section>
       </section>
 
-      <section class="terminal-grid content-grid">
-        <section class="terminal-panel tall-panel">
-          <div class="panel-title">LIVE CRAWL TRANSMISSION</div>
+        <section class="terminal-grid content-grid">
+          <section class="terminal-panel tall-panel">
+          <div class="panel-title">POLLED CRAWL SNAPSHOT (1.5s)</div>
           <pre class="terminal-log selectable" id="liveFeed">Awaiting target acquisition…</pre>
         </section>
 

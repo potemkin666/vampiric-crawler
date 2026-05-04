@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Mapping
 
 verbose = False
@@ -38,6 +39,7 @@ class RuntimeConfig:
     ritual_chain: str = ''
     mode: str = 'generic'
     temporal_baseline: str = ''
+    hidden_words: tuple[str, ...] = ()
     scope_allow: tuple[str, ...] = ()
     scope_deny: tuple[str, ...] = ()
     checkpoint: str = ''
@@ -51,6 +53,7 @@ class RuntimeConfig:
         raw = raw or {}
         extract_intel = bool(raw.get('extract_intel', not bool(raw.get('only_urls', False))))
         only_urls = bool(raw.get('only_urls', not extract_intel))
+        hidden_words = _coerce_word_list(raw.get('hidden_words'))
         return cls(
             depth=max(1, int(raw.get('depth', 2) or 2)),
             threads=max(1, int(raw.get('threads', 4) or 4)),
@@ -70,6 +73,7 @@ class RuntimeConfig:
             ritual_chain=str(raw.get('ritual_chain') or ''),
             mode=str(raw.get('mode', 'generic') or 'generic'),
             temporal_baseline=str(raw.get('temporal_baseline') or ''),
+            hidden_words=hidden_words,
             scope_allow=tuple(str(item) for item in (raw.get('scope_allow') or ())),
             scope_deny=tuple(str(item) for item in (raw.get('scope_deny') or ())),
             checkpoint=str(raw.get('checkpoint') or ''),
@@ -99,6 +103,7 @@ class RuntimeConfig:
             'ritual_chain': self.ritual_chain,
             'mode': self.mode,
             'temporal_baseline': self.temporal_baseline,
+            'hidden_words': list(self.hidden_words),
             'scope_allow': list(self.scope_allow),
             'scope_deny': list(self.scope_deny),
             'checkpoint': self.checkpoint,
@@ -123,4 +128,25 @@ class RuntimeConfig:
             'respect_robots_delay': self.respect_robots_delay,
             'enumerate_subdomains': self.enumerate_subdomains,
             'dry_run': self.dry_run,
+            'hidden_words': list(self.hidden_words),
         }
+
+
+def _coerce_word_list(raw: Any) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        values = re.split(r'[\s,]+', raw)
+    else:
+        values = []
+        for item in raw:
+            values.extend(re.split(r'[\s,]+', str(item)))
+    seen: set[str] = set()
+    normalized = []
+    for value in values:
+        token = value.strip().lower()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return tuple(normalized)

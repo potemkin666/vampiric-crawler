@@ -68,6 +68,7 @@ from core.modes import (
     PRESET_DEFINITIONS,
     RITUAL_CHAIN_DEFINITIONS,
     build_hidden_candidates,
+    build_hidden_candidate_records,
     build_temporal_diffs,
     coerce_preset,
     coerce_ritual_chain,
@@ -176,6 +177,7 @@ parser.add_argument('--render-timeout', help='Per-page render timeout in seconds
 parser.add_argument('--checkpoint', help='Write crawl state to this checkpoint file')
 parser.add_argument('--resume', help='Resume a previous crawl from this checkpoint file')
 parser.add_argument('--temporal-baseline', help='Directory containing a prior crawl snapshot for temporal diff mode')
+parser.add_argument('--hidden-word', help='Extra hidden-path token to probe (repeatable)', action='append', default=[])
 parser.add_argument('--respect-robots-delay', help='Honor robots.txt Crawl-delay when present', action='store_true')
 parser.add_argument('--host-concurrency', help='Maximum concurrent requests per host (default: 2)', type=int, default=2)
 parser.add_argument('--disable-adaptive-backoff', help='Disable automatic backoff on 429/503 responses', action='store_true')
@@ -289,6 +291,7 @@ runtime_config = RuntimeConfig.from_mapping({
     'ritual_chain': ritual_chain,
     'mode': ritual_plan['mode'],
     'temporal_baseline': temporal_baseline or '',
+    'hidden_words': args.hidden_word,
     'verbose': args.verbose,
 })
 
@@ -453,6 +456,7 @@ threads = set()
 locations = set()
 stories = set()
 hidden_paths = set()
+hidden_probe_sources = set()
 scam_signals = set()
 temporal_diffs = set()
 site_anatomy = set()
@@ -500,6 +504,7 @@ if resume_state:
     locations.update(restored['locations'])
     stories.update(restored['stories'])
     hidden_paths.update(restored['hidden_paths'])
+    hidden_probe_sources.update(restored['hidden_probe_sources'])
     scam_signals.update(restored['scam_signals'])
     temporal_diffs.update(restored['temporal_diffs'])
     site_anatomy.update(restored['site_anatomy'])
@@ -706,6 +711,7 @@ extractor_context = {
     'locations': locations,
     'stories': stories,
     'hidden_paths': hidden_paths,
+    'hidden_probe_sources': hidden_probe_sources,
     'scam_signals': scam_signals,
     'temporal_diffs': temporal_diffs,
     'bad_scripts': bad_scripts,
@@ -779,6 +785,7 @@ def checkpoint_payload(stage):
         'locations': sorted(locations),
         'stories': sorted(stories),
         'hidden_paths': sorted(hidden_paths),
+        'hidden_probe_sources': sorted(hidden_probe_sources),
         'scam_signals': sorted(scam_signals),
         'temporal_diffs': sorted(temporal_diffs),
         'site_anatomy': sorted(site_anatomy),
@@ -1092,12 +1099,26 @@ def harvest_documents():
 def discover_hidden_paths():
     if mode != 'hidden':
         return
-    guesses = build_hidden_candidates(main_url, internal, scripts, endpoints)
-    if not guesses:
+    candidate_records = build_hidden_candidate_records(
+        main_url,
+        internal,
+        scripts,
+        endpoints,
+        extra_words=runtime_config.hidden_words,
+    )
+    if not candidate_records:
         return
-    print(f'{fang}Probing {len(guesses)} shadow path{"s" if len(guesses) != 1 else ""}…')
-    for guess in guesses:
-        normalized_guess = normalize_url(guess, base_url=main_url)
+    wordlist_count = sum(1 for item in candidate_records if item['strategy'] == 'wordlist')
+    learned_count = sum(1 for item in candidate_records if item['strategy'] == 'learned')
+    print(
+        f'{fang}Probing {len(candidate_records)} shadow path{"s" if len(candidate_records) != 1 else ""}… '
+        f'(wordlist={wordlist_count}, learned={learned_count})'
+    )
+    for candidate in candidate_records:
+        hidden_probe_sources.add(
+            f'probe={candidate["probe"]} strategy={candidate["strategy"]} token={candidate["token"]} source={candidate["source"]}'
+        )
+        normalized_guess = normalize_url(candidate['probe'], base_url=main_url)
         if not normalized_guess:
             continue
         if normalized_guess in processed or normalized_guess in internal or normalized_guess in external:
@@ -1112,7 +1133,9 @@ def discover_hidden_paths():
         )
         if not record_request_outcome(normalized_guess, result, 'page'):
             continue
-        hidden_paths.add(normalized_guess)
+        hidden_paths.add(
+            f'url={normalized_guess} strategy={candidate["strategy"]} token={candidate["token"]} source={candidate["source"]}'
+        )
         response = maybe_render_page(normalized_guess, result)
         run_page_extractors(normalized_guess, response, extractor_context)
 
@@ -1347,7 +1370,7 @@ artifact_genealogy_placeholder = set()
 datasets = [
     list(files), list(forms), list(intel), list(robots), list(custom), ordered_url_values(failed, state='failed'), list(skipped), ordered_redirect_values(redirects), ordered_url_values(internal),
     ordered_url_values(scripts), ordered_url_values(external), list(fuzzable), list(endpoints), list(keys),
-    list(document_metadata), list(document_leaks), list(js_intel), list(threads), list(locations), list(stories), list(hidden_paths), list(scam_signals), list(temporal_diffs),
+    list(document_metadata), list(document_leaks), list(js_intel), list(threads), list(locations), list(stories), list(hidden_paths), list(hidden_probe_sources), list(scam_signals), list(temporal_diffs),
     list(site_anatomy), list(mutation_probes), list(artifact_genealogy_placeholder),
 ]
 
@@ -1373,6 +1396,7 @@ datasets_dict = {
     'locations': sorted(locations),
     'stories': sorted(stories),
     'hidden_paths': sorted(hidden_paths),
+    'hidden_probe_sources': sorted(hidden_probe_sources),
     'scam_signals': sorted(scam_signals),
     'temporal_diffs': sorted(temporal_diffs),
 }
@@ -1386,7 +1410,7 @@ datasets = [
     datasets_dict['files'], datasets_dict['forms'], datasets_dict['intel'], datasets_dict['robots'], datasets_dict['custom'], datasets_dict['failed'], datasets_dict['skipped'],
     datasets_dict['redirects'], datasets_dict['internal'], datasets_dict['scripts'], datasets_dict['external'], datasets_dict['fuzzable'], datasets_dict['endpoints'],
     datasets_dict['keys'], datasets_dict['document_metadata'], datasets_dict['document_leaks'], datasets_dict['js_intel'], datasets_dict['threads'], datasets_dict['locations'],
-    datasets_dict['stories'], datasets_dict['hidden_paths'], datasets_dict['scam_signals'], datasets_dict['temporal_diffs'], sorted(site_anatomy), sorted(mutation_probes), sorted(artifact_genealogy_lines),
+    datasets_dict['stories'], datasets_dict['hidden_paths'], datasets_dict['hidden_probe_sources'], datasets_dict['scam_signals'], datasets_dict['temporal_diffs'], sorted(site_anatomy), sorted(mutation_probes), sorted(artifact_genealogy_lines),
 ]
 writer(datasets, dataset_names, output_dir)
 

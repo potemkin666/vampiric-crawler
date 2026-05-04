@@ -17,6 +17,7 @@ from core.checkpoint import load_checkpoint, normalize_checkpoint_sets, save_che
 from core.autopsy import build_site_anatomy
 from core.modes import (
     build_hidden_candidates,
+    build_hidden_candidate_records,
     build_temporal_diffs,
     coerce_preset,
     coerce_ritual_chain,
@@ -550,8 +551,9 @@ class RegressionTests(unittest.TestCase):
             '<html><head><meta name="geo.position" content="40.7128;-74.0060"></head>'
             '<body>Gathering in New York 40.7128, -74.0060</body></html>',
         )
-        self.assertTrue(any('lat=40.7128' in item for item in location_records))
-        self.assertTrue(any('label=New York' in item for item in location_records))
+        self.assertTrue(any('confidence=exact' in item and 'lat=40.7128' in item for item in location_records))
+        self.assertTrue(any('confidence=high' in item and 'label=geo.position' in item for item in location_records))
+        self.assertTrue(any('confidence=weak' in item and 'label=New York' in item for item in location_records))
 
         story_records = extract_story_records(
             'https://example.com/news',
@@ -560,8 +562,9 @@ class RegressionTests(unittest.TestCase):
             '<meta property="article:published_time" content="2026-05-03T00:15:00Z"></head>'
             '<body>"Witnesses saw sparks in the abbey."<a href="https://mirror.example.net/story">mirror</a></body></html>',
         )
-        self.assertTrue(any('story=vampire-bats-swarm-the-wires' in item for item in story_records))
-        self.assertTrue(any('reference=https://mirror.example.net/story' in item for item in story_records))
+        self.assertTrue(any('story=vampire-bats-swarm-the-wires' in item and 'relation=page' in item for item in story_records))
+        self.assertTrue(any('relation=mirror' in item and 'reference=https://mirror.example.net/story' in item for item in story_records))
+        self.assertTrue(any('relation=metadata' in item and 'published=2026-05-03T00:15:00Z' in item for item in story_records))
 
         scam_records = extract_scam_signals(
             'https://example.com/offer',
@@ -577,6 +580,15 @@ class RegressionTests(unittest.TestCase):
             {'/api/crypt'},
         )
         self.assertIn('https://example.com/admin', hidden_candidates)
+        hidden_records = build_hidden_candidate_records(
+            'https://example.com',
+            {'https://example.com/app'},
+            {'https://example.com/static/app.js'},
+            {'/api/crypt'},
+            extra_words=('vault',),
+        )
+        self.assertTrue(any(item['probe'] == 'https://example.com/vault' and item['strategy'] == 'wordlist' for item in hidden_records))
+        self.assertTrue(any(item['probe'] == 'https://example.com/app' and item['strategy'] == 'learned' for item in hidden_records))
 
         diffs = build_temporal_diffs(
             {
@@ -978,8 +990,9 @@ class RegressionTests(unittest.TestCase):
                 self.assertIn('archivist@example.com', Path(doc_output, 'document_leaks.txt').read_text(encoding='utf-8'))
 
                 hidden_output = os.path.join(tmpdir, 'hidden')
-                run_mode('hidden', hidden_output)
-                self.assertIn('/admin', Path(hidden_output, 'hidden_paths.txt').read_text(encoding='utf-8'))
+                run_mode('hidden', hidden_output, ['--hidden-word', 'vault'])
+                self.assertIn('strategy=', Path(hidden_output, 'hidden_paths.txt').read_text(encoding='utf-8'))
+                self.assertIn('token=vault', Path(hidden_output, 'hidden_probe_sources.txt').read_text(encoding='utf-8'))
 
                 forum_output = os.path.join(tmpdir, 'forum')
                 run_mode('forum', forum_output)
@@ -1137,6 +1150,7 @@ class RegressionTests(unittest.TestCase):
                     'archive_seeds': True,
                     'enumerate_subdomains': True,
                     'temporal_baseline': '/tmp/baseline',
+                    'hidden_words': ['vault', 'attic'],
                 },
                 output_dir=os.path.abspath(output_dir),
                 checkpoint_path=os.path.abspath(checkpoint),
@@ -1156,6 +1170,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('--keys', rendered)
         self.assertIn('--only-urls', rendered)
         self.assertIn('--temporal-baseline /tmp/baseline', rendered)
+        self.assertIn('--hidden-word vault', rendered)
 
     def test_cli_startup_handles_non_utf8_stdout(self):
         process = subprocess.run(

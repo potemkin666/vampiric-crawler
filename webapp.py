@@ -200,6 +200,7 @@ def resolve_payload(payload: dict[str, Any]) -> dict[str, Any]:
         'archive_seeds': payload.get('archive_seeds', False),
         'enumerate_subdomains': payload.get('enumerate_subdomains', False),
         'dry_run': payload.get('dry_run', False),
+        'hidden_words': payload.get('hidden_words', []),
         'preset': coerce_preset(payload.get('preset')),
         'depth': payload.get('depth', 2),
         'threads': payload.get('threads', 4),
@@ -292,6 +293,8 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         command.append('--dry-run')
     if runtime_config.temporal_baseline:
         command.extend(['--temporal-baseline', runtime_config.temporal_baseline])
+    for word in runtime_config.hidden_words:
+        command.extend(['--hidden-word', word])
     return command
 
 
@@ -316,6 +319,8 @@ def command_preview(payload: dict[str, Any]) -> str:
         preview += ' --dns'
     if runtime_config.dry_run:
         preview += ' --dry-run'
+    if runtime_config.hidden_words:
+        preview += f' --hidden-word {runtime_config.hidden_words[0]}'
     return preview.strip()
 
 
@@ -651,16 +656,16 @@ def build_summary_cards(mode: str, datasets: dict[str, list[str]], stats: dict[s
             {'label': 'REPLIES', 'value': len([item for item in datasets.get('threads', []) if 'reply_to=' in item])},
         ],
         'geo': [
-            {'label': 'PLACES', 'value': len(datasets.get('locations', []))},
-            {'label': 'MAP', 'value': len([item for item in datasets.get('locations', []) if 'lat=' in item and 'lon=' in item])},
+            {'label': 'EXACT', 'value': len([item for item in datasets.get('locations', []) if 'confidence=exact' in item])},
+            {'label': 'WEAK', 'value': len([item for item in datasets.get('locations', []) if 'confidence=weak' in item])},
         ],
         'news': [
-            {'label': 'STORIES', 'value': len([item for item in datasets.get('stories', []) if ' title=' in item])},
-            {'label': 'REFS', 'value': len([item for item in datasets.get('stories', []) if 'reference=' in item])},
+            {'label': 'PAGES', 'value': len([item for item in datasets.get('stories', []) if ' relation=page ' in item])},
+            {'label': 'MIRRORS', 'value': len([item for item in datasets.get('stories', []) if ' relation=mirror ' in item])},
         ],
         'hidden': [
             {'label': 'SHADOWS', 'value': len(datasets.get('hidden_paths', []))},
-            {'label': 'ENDPTS', 'value': len(datasets.get('endpoints', []))},
+            {'label': 'PROBES', 'value': len(datasets.get('hidden_probe_sources', []))},
         ],
         'scam': [
             {'label': 'HEXES', 'value': len(datasets.get('scam_signals', []))},
@@ -694,6 +699,7 @@ def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats:
         'locations': {'key': 'locations', 'title': 'BLOOD MAP POINTS', 'count': len(datasets.get('locations', [])), 'items': datasets.get('locations', [])[:TEXT_LIMIT]},
         'stories': {'key': 'stories', 'title': 'MUTATING STORY CHAINS', 'count': len(datasets.get('stories', [])), 'items': datasets.get('stories', [])[:TEXT_LIMIT]},
         'hidden_paths': {'key': 'hidden_paths', 'title': 'SHADOW GATES', 'count': len(datasets.get('hidden_paths', [])), 'items': datasets.get('hidden_paths', [])[:TEXT_LIMIT]},
+        'hidden_probe_sources': {'key': 'hidden_probe_sources', 'title': 'SHADOW PROBE SOURCES', 'count': len(datasets.get('hidden_probe_sources', [])), 'items': datasets.get('hidden_probe_sources', [])[:TEXT_LIMIT]},
         'scam_signals': {'key': 'scam_signals', 'title': 'HEXED MERCHANT OMENS', 'count': len(datasets.get('scam_signals', [])), 'items': datasets.get('scam_signals', [])[:TEXT_LIMIT]},
         'temporal_diffs': {'key': 'temporal_diffs', 'title': 'TIME-SLICE OMENS', 'count': len(datasets.get('temporal_diffs', [])), 'items': datasets.get('temporal_diffs', [])[:TEXT_LIMIT]},
         'site_anatomy': {'key': 'site_anatomy', 'title': 'SITE ANATOMY', 'count': len(datasets.get('site_anatomy', [])), 'items': datasets.get('site_anatomy', [])[:TEXT_LIMIT]},
@@ -706,7 +712,7 @@ def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats:
         'forum': ['threads', 'links', 'mail', 'vitals'],
         'geo': ['locations', 'links', 'vitals'],
         'news': ['stories', 'links', 'vitals'],
-        'hidden': ['hidden_paths', 'links', 'broken', 'vitals'],
+        'hidden': ['hidden_paths', 'hidden_probe_sources', 'links', 'broken', 'vitals'],
         'scam': ['scam_signals', 'links', 'forms', 'vitals'],
         'temporal': ['temporal_diffs', 'artifact_genealogy', 'links', 'vitals'],
         'generic': ['site_anatomy', 'mutation_probes', 'links', 'mail', 'documents', 'relics', 'scripts', 'broken', 'forms', 'vitals'],

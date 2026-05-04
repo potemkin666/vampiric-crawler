@@ -53,7 +53,7 @@ const MODE_CONFIG = {
   },
   hidden: {
     label: 'SHADOW GATE HUNT',
-    description: 'Blend learned paths with a bounded wordlist to find sealed routes and hidden doors.',
+    description: 'Blend learned paths with a bounded wordlist, and show which probe came from which source.',
     flags: ['scope', 'robots', 'archive', 'dry'],
     force: {},
   },
@@ -79,6 +79,7 @@ const els = {
   crawlPreset: document.getElementById('crawlPreset'),
   inputKind: document.getElementById('inputKind'),
   crawlMode: document.getElementById('crawlMode'),
+  hiddenWords: document.getElementById('hiddenWords'),
   depth: document.getElementById('depth'),
   threads: document.getElementById('threads'),
   delay: document.getElementById('delay'),
@@ -153,6 +154,7 @@ function formPayload() {
     archive_seeds: els.archiveSeeds.checked,
     enumerate_subdomains: els.dns.checked,
     dry_run: els.dryRun.checked,
+    hidden_words: els.hiddenWords.value.trim(),
   };
 }
 
@@ -170,6 +172,7 @@ async function renderCommandPreview() {
       `Target URL: ${resolved.target_url || '-'}`,
       `Depth=${resolved.depth} Threads=${resolved.threads} Delay=${resolved.delay} Timeout=${resolved.timeout}`,
       `Flags: scope=${resolved.scope} render=${resolved.render_js} archive=${resolved.archive_seeds} dns=${resolved.enumerate_subdomains} dry=${resolved.dry_run}`,
+      `Shadow words: ${(resolved.hidden_words || []).join(', ') || '-'}`,
     ].join('\n');
   } catch (error) {
     els.commandPreview.textContent = `> CRAWL ${payload.target_specimen || 'https://example.com'} --depth ${payload.depth}`;
