@@ -788,19 +788,38 @@ def ensure_exports(run: CrawlRun) -> None:
 
 def build_setup_diagnostics(output_dir: Path, proxy: str | None = None) -> dict[str, Any]:
     status = setup_status(output_dir=str(output_dir), proxy=proxy)
+    safe_packages = {
+        name: _public_check_status(value)
+        for name, value in sorted(status['packages'].items())
+    }
+    safe_output_dir = {
+        'path': status['output_dir']['path'],
+        'status': 'ok' if status['output_dir']['status'] == 'ok' else 'missing',
+        'detail': status['output_dir']['path'] if status['output_dir']['status'] == 'ok' else 'Review the CLI setup check output for write-path remediation.',
+    }
+    safe_proxy = {
+        'status': status['proxy']['status'],
+        'detail': status['proxy']['detail'] if status['proxy']['status'] in {'ok', 'not-configured'} else 'Review the CLI setup check output for proxy remediation.',
+    }
     checks = [
-        {'name': f'package:{name}', 'status': _public_check_status(value), 'detail': _public_check_detail(value)}
+        {'name': f'package:{name}', 'status': safe_packages[name], 'detail': _public_check_detail(value)}
         for name, value in sorted(status['packages'].items())
     ]
     checks.extend([
         {'name': 'playwright-browser', 'status': _public_check_status(status['playwright_browser']), 'detail': _public_check_detail(status['playwright_browser'])},
         {'name': 'render-smoke', 'status': _public_check_status(status['render_smoke']), 'detail': _public_check_detail(status['render_smoke'])},
-        {'name': 'output-dir', 'status': status['output_dir']['status'], 'detail': status['output_dir']['path']},
-        {'name': 'proxy-sanity', 'status': status['proxy']['status'], 'detail': status['proxy']['detail']},
+        {'name': 'output-dir', 'status': safe_output_dir['status'], 'detail': safe_output_dir['detail']},
+        {'name': 'proxy-sanity', 'status': safe_proxy['status'], 'detail': safe_proxy['detail']},
     ])
     issues = [item for item in checks if str(item['status']) not in {'ok', 'not-configured'}]
     return {
-        **status,
+        'packages': safe_packages,
+        'playwright_browser': _public_check_status(status['playwright_browser']),
+        'render_smoke': _public_check_status(status['render_smoke']),
+        'output_dir': safe_output_dir,
+        'proxy': safe_proxy,
+        'install_hint': status['install_hint'],
+        'browser_hint': status['browser_hint'],
         'checks': checks,
         'overall_status': 'ok' if not issues else 'issues',
         'status_message': 'FIRST-RUN DIAGNOSTICS CLEAR' if not issues else 'FIRST-RUN DIAGNOSTICS FOUND ISSUES',
