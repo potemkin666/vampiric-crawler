@@ -24,12 +24,16 @@ from core.autopsy import (
     ANALYSIS_DATASET_NAMES,
     build_autopsy,
     build_crawl_manifest,
+    build_run_metadata,
     build_mutation_probes,
     build_site_anatomy,
+    build_structured_snapshot,
     finalize_genealogy,
     render_autopsy_markdown,
     write_manifest_file,
+    write_structured_snapshot_file,
 )
+from core.config import RuntimeConfig
 from core.modes import (
     MODE_DATASET_NAMES,
     MODE_DEFINITIONS,
@@ -217,6 +221,12 @@ def resolve_payload(payload: dict[str, Any]) -> dict[str, Any]:
     resolved['mode'] = coerce_mode(payload.get('mode') or resolved['mode'])
     if payload.get('temporal_baseline'):
         resolved['temporal_baseline'] = payload['temporal_baseline']
+    runtime_config = RuntimeConfig.from_mapping({
+        **resolved,
+        'ritual_chain': ritual['ritual_chain'],
+    })
+    resolved.update(runtime_config.as_dict())
+    resolved['ritual_chain'] = ritual['ritual_chain']
     return resolved
 
 
@@ -225,15 +235,14 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
     target_specimen = (payload.get('target_specimen') or '').strip()
     if not target_specimen:
         raise ValueError('TARGET SPECIMEN is required.')
+    runtime_config = RuntimeConfig.from_mapping(payload)
 
-    depth = max(1, min(int(payload.get('depth', 2)), 8))
-    threads = max(1, min(int(payload.get('threads', 4)), 32))
-    delay = max(0.0, float(payload.get('delay', 0)))
-    timeout = max(1.0, float(payload.get('timeout', 8)))
-    scope = payload.get('scope', 'host')
-    if scope not in ('host', 'domain'):
-        raise ValueError('Invalid scope.')
-    mode = coerce_mode(payload.get('mode'))
+    depth = min(runtime_config.depth, 8)
+    threads = min(runtime_config.threads, 32)
+    delay = runtime_config.delay
+    timeout = runtime_config.timeout
+    scope = runtime_config.scope
+    mode = coerce_mode(runtime_config.mode)
 
     command = [
         sys.executable,
@@ -258,7 +267,7 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         '--preset',
         coerce_preset(payload.get('preset')),
         '--input-kind',
-        str(payload.get('input_kind', 'auto')),
+        runtime_config.input_kind,
         '--checkpoint',
         str(checkpoint_path),
         '-o',
@@ -266,44 +275,45 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         '-v',
     ]
 
-    if payload.get('respect_robots_delay'):
+    if runtime_config.respect_robots_delay:
         command.append('--respect-robots-delay')
-    if payload.get('render_js'):
+    if runtime_config.render_js:
         command.append('--render-js')
-    if payload.get('enumerate_subdomains'):
+    if runtime_config.enumerate_subdomains:
         command.append('--dns')
-    if payload.get('archive_seeds'):
+    if runtime_config.archive_seeds:
         command.append('--wayback')
-    if payload.get('extract_secrets'):
+    if runtime_config.extract_secrets:
         command.append('--keys')
-    if not payload.get('extract_intel', True):
+    if runtime_config.only_urls:
         command.append('--only-urls')
-    if payload.get('dry_run'):
+    if runtime_config.dry_run:
         command.append('--dry-run')
-    if payload.get('temporal_baseline'):
-        command.extend(['--temporal-baseline', str(payload['temporal_baseline'])])
+    if runtime_config.temporal_baseline:
+        command.extend(['--temporal-baseline', runtime_config.temporal_baseline])
     return command
 
 
 def command_preview(payload: dict[str, Any]) -> str:
     payload = resolve_payload(payload)
-    mode = coerce_mode(payload.get('mode'))
-    preview = f'CRAWL {(payload.get("target_specimen") or "").strip()} --depth {int(payload.get("depth", 2))}'
+    runtime_config = RuntimeConfig.from_mapping(payload)
+    mode = coerce_mode(runtime_config.mode)
+    preview = f'CRAWL {(payload.get("target_specimen") or "").strip()} --depth {runtime_config.depth}'
     if payload.get('ritual_chain'):
         preview += f' --ritual-chain {payload["ritual_chain"]}'
     if mode != 'generic':
         preview += f' --mode {mode}'
-    if payload.get('preset', 'balanced') != 'balanced':
-        preview += f' --preset {payload["preset"]}'
-    if payload.get('scope', 'host') == 'domain':
+    if runtime_config.preset != 'balanced':
+        preview += f' --preset {runtime_config.preset}'
+    if runtime_config.scope == 'domain':
         preview += ' --scope domain'
-    if payload.get('render_js'):
+    if runtime_config.render_js:
         preview += ' --render-js'
-    if payload.get('archive_seeds'):
+    if runtime_config.archive_seeds:
         preview += ' --wayback'
-    if payload.get('enumerate_subdomains'):
+    if runtime_config.enumerate_subdomains:
         preview += ' --dns'
-    if payload.get('dry_run'):
+    if runtime_config.dry_run:
         preview += ' --dry-run'
     return preview.strip()
 
@@ -725,6 +735,7 @@ def ensure_exports(run: CrawlRun) -> None:
     if run.exports_ready:
         return
     datasets, stats = collect_run_artifacts(run.output_dir, run.checkpoint_path)
+    runtime_config = RuntimeConfig.from_mapping(run.payload)
     payload = {name: values for name, values in datasets.items() if values}
     if stats:
         payload['stats'] = stats
@@ -734,6 +745,17 @@ def ensure_exports(run: CrawlRun) -> None:
     exporter(str(run.output_dir), 'csv', payload)
     anatomy = build_site_anatomy(run.payload.get('target_url', ''), datasets, {}, run.payload.get('specimen', {}))
     probes = build_mutation_probes(run.payload.get('target_url', ''), datasets)
+    run_metadata = build_run_metadata(
+        run_id=run.run_id,
+        preset=coerce_preset(run.payload.get('preset')),
+        mode=coerce_mode(run.payload.get('mode')),
+        ritual_chain=coerce_ritual_chain(run.payload.get('ritual_chain')),
+        command=run.command,
+        runtime_config=runtime_config,
+        baseline_source=str(run.payload.get('temporal_baseline') or ''),
+        output_dir=str(run.output_dir),
+        saved_at=run.ended_at or now_iso(),
+    )
     autopsy = build_autopsy(
         specimen=run.payload.get('specimen', {}),
         ritual={
@@ -750,6 +772,7 @@ def ensure_exports(run: CrawlRun) -> None:
         exports=['results.json', 'results.csv', 'autopsy.json', 'autopsy.md', 'sealed-bundle.zip'],
         duration_seconds=float(stats.get('duration_seconds', 0) or 0),
         content_types={},
+        run_metadata=run_metadata,
     )
     autopsy_json_path = run.output_dir / 'autopsy.json'
     autopsy_md_path = run.output_dir / 'autopsy.md'
@@ -766,11 +789,23 @@ def ensure_exports(run: CrawlRun) -> None:
         command=run.command,
         output_dir=str(run.output_dir),
         main_url=run.payload.get('target_url', ''),
-        resolved_config=run.payload,
+        resolved_config=runtime_config.as_dict(),
         checkpoint_path=str(run.checkpoint_path),
         temporal_baseline=str(run.payload.get('temporal_baseline') or ''),
+        run_metadata=run_metadata,
     )
     write_manifest_file(str(run.output_dir), manifest)
+    write_structured_snapshot_file(
+        str(run.output_dir),
+        build_structured_snapshot(
+            dataset_names=DATASET_FILES,
+            datasets=datasets,
+            stats=stats,
+            autopsy=autopsy,
+            manifest=manifest,
+            content_types={},
+        ),
+    )
     bundle_path = run.output_dir / 'sealed-bundle.zip'
     with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for child in sorted(run.output_dir.iterdir()):

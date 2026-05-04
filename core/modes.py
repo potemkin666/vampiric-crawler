@@ -468,22 +468,53 @@ def build_temporal_diffs(previous_snapshot: dict[str, object], current_snapshot:
     diffs = set()
     dataset_names = set(previous_snapshot) | set(current_snapshot)
     for name in sorted(dataset_names):
-        previous = previous_snapshot.get(name)
-        current = current_snapshot.get(name)
-        if any(isinstance(value, dict) for value in (previous, current)):
-            previous = previous or {}
-            current = current or {}
-            keys = set(previous) | set(current)
-            for key in sorted(keys):
-                prev_value = previous.get(key)
-                curr_value = current.get(key)
-                if prev_value != curr_value:
-                    diffs.add(f'dataset={name} metric={key} before={prev_value} after={curr_value}')
-            continue
-        previous_values = set(previous or [])
-        current_values = set(current or [])
-        for item in sorted(current_values - previous_values):
-            diffs.add(f'dataset={name} change=added value={item}')
-        for item in sorted(previous_values - current_values):
-            diffs.add(f'dataset={name} change=removed value={item}')
+        diffs.update(_build_temporal_diff_records([name], previous_snapshot.get(name), current_snapshot.get(name)))
     return diffs
+
+
+def _build_temporal_diff_records(path: list[str], previous: object, current: object) -> set[str]:
+    if isinstance(previous, dict) or isinstance(current, dict):
+        previous_map = previous if isinstance(previous, dict) else {}
+        current_map = current if isinstance(current, dict) else {}
+        diffs = set()
+        for key in sorted(set(previous_map) | set(current_map)):
+            diffs.update(_build_temporal_diff_records(path + [str(key)], previous_map.get(key), current_map.get(key)))
+        return diffs
+    if _is_temporal_sequence(previous) or _is_temporal_sequence(current):
+        previous_values = set(_normalize_temporal_sequence(previous))
+        current_values = set(_normalize_temporal_sequence(current))
+        diffs = set()
+        for item in sorted(current_values - previous_values):
+            diffs.add(_format_temporal_list_diff(path, 'added', item))
+        for item in sorted(previous_values - current_values):
+            diffs.add(_format_temporal_list_diff(path, 'removed', item))
+        return diffs
+    if previous == current:
+        return set()
+    return {_format_temporal_scalar_diff(path, previous, current)}
+
+
+def _is_temporal_sequence(value: object) -> bool:
+    return isinstance(value, (list, tuple, set))
+
+
+def _normalize_temporal_sequence(value: object) -> list[str]:
+    if not _is_temporal_sequence(value):
+        return []
+    return [str(item) for item in value if item is not None]
+
+
+def _format_temporal_list_diff(path: list[str], change: str, value: str) -> str:
+    dataset = path[0]
+    if len(path) == 1:
+        return f'dataset={dataset} change={change} value={value}'
+    return f'dataset={dataset} item={" / ".join(path[1:])} change={change} value={value}'
+
+
+def _format_temporal_scalar_diff(path: list[str], previous: object, current: object) -> str:
+    dataset = path[0]
+    if len(path) == 1:
+        return f'dataset={dataset} metric=value before={previous} after={current}'
+    if len(path) == 2:
+        return f'dataset={dataset} metric={path[1]} before={previous} after={current}'
+    return f'dataset={dataset} item={" / ".join(path[1:-1])} field={path[-1]} before={previous} after={current}'

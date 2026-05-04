@@ -39,20 +39,26 @@ from core.checkpoint import normalize_checkpoint_mapping
 import core.config
 from core.autopsy import (
     ANALYSIS_DATASET_NAMES,
+    TEMPORAL_BASELINE_FILE,
     anatomy_lines,
     build_autopsy,
     build_crawl_manifest,
+    build_run_metadata,
     build_mutation_probes,
     build_site_anatomy,
+    build_structured_snapshot,
     finalize_genealogy,
     genealogy_lines,
+    load_previous_snapshot,
     mutation_lines,
     record_artifact_discovery,
+    snapshot_exists,
     update_artifact_observation,
     write_autopsy_files,
     write_manifest_file,
+    write_structured_snapshot_file,
 )
-from core.config import INTELS
+from core.config import INTELS, RuntimeConfig
 from core.extractors import run_page_extractors, run_script_extractors
 from core.flash import flash
 from core.modes import (
@@ -276,20 +282,28 @@ resolved_config = apply_preset(
     (resume_state.get('preset') if resume_state and not cli_arg_present('--preset') else args.preset),
     explicit_options,
 )
+runtime_config = RuntimeConfig.from_mapping({
+    **resolved_config,
+    'preset': resume_state.get('preset') if resume_state and not cli_arg_present('--preset') else args.preset,
+    'ritual_chain': ritual_chain,
+    'mode': ritual_plan['mode'],
+    'temporal_baseline': temporal_baseline or '',
+    'verbose': args.verbose,
+})
 
-delay = float(resolved_config['delay'])
-timeout = float(resolved_config['timeout'])
-api = bool(resolved_config['extract_secrets'])
-only_urls = bool(resolved_config['only_urls'])
-crawl_level = int(resolved_config['depth'])
-thread_count = int(resolved_config['threads'])
-scope_mode = str(resolved_config['scope'])
+delay = runtime_config.delay
+timeout = runtime_config.timeout
+api = runtime_config.extract_secrets
+only_urls = runtime_config.only_urls
+crawl_level = runtime_config.depth
+thread_count = runtime_config.threads
+scope_mode = runtime_config.scope
 mode = coerce_mode(ritual_plan['mode'])
-preset = coerce_preset(resolved_config.get('preset'))
+preset = coerce_preset(runtime_config.preset)
 document_depth_forced = mode == 'document' and crawl_level < 1
-args.archive = bool(resolved_config.get('archive_seeds'))
-args.render_js = bool(resolved_config.get('render_js'))
-args.respect_robots_delay = bool(resolved_config.get('respect_robots_delay'))
+args.archive = runtime_config.archive_seeds
+args.render_js = runtime_config.render_js
+args.respect_robots_delay = runtime_config.respect_robots_delay
 dataset_names = [
     'files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped',
     'redirects', 'internal', 'scripts', 'external', 'fuzzable',
@@ -391,8 +405,8 @@ if args.dry_run:
     print(f'{fang}Threads         {thread_count}')
     print(f'{fang}Delay           {delay}')
     print(f'{fang}Timeout         {timeout}')
-    print(f'{fang}Archive seeds   {str(bool(resolved_config.get("archive_seeds"))).lower()}')
-    print(f'{fang}Render JS       {str(bool(resolved_config.get("render_js"))).lower()}')
+    print(f'{fang}Archive seeds   {str(runtime_config.archive_seeds).lower()}')
+    print(f'{fang}Render JS       {str(runtime_config.render_js).lower()}')
     print(f'{fang}Secrets         {str(api).lower()}')
     if specimen_profile.get('notes'):
         for note in specimen_profile['notes']:
@@ -1102,37 +1116,6 @@ def discover_hidden_paths():
         run_page_extractors(normalized_guess, response, extractor_context)
 
 
-def load_previous_snapshot(snapshot_dir):
-    if not snapshot_dir or not os.path.isdir(snapshot_dir):
-        return {}
-    snapshot = {}
-    for name in list(dataset_names) + ['stats']:
-        path = os.path.join(snapshot_dir, f'{name}.txt')
-        if not os.path.exists(path):
-            continue
-        with open(path, 'r', encoding='utf-8') as handle:
-            lines = [line.rstrip('\n') for line in handle if line.strip()]
-        if name == 'stats':
-            stats_dict = {}
-            for line in lines:
-                key, _, value = line.partition('=')
-                if key:
-                    stats_dict[key] = value
-            snapshot[name] = stats_dict
-        else:
-            snapshot[name] = lines
-    return snapshot
-
-
-def snapshot_exists(snapshot_dir):
-    if not snapshot_dir or not os.path.isdir(snapshot_dir):
-        return False
-    return any(
-        os.path.exists(os.path.join(snapshot_dir, f'{name}.txt'))
-        for name in list(dataset_names) + ['stats']
-    )
-
-
 def process_inline_specimen():
     inline_payload = specimen_profile.get('inline_payload') or ''
     if not inline_payload:
@@ -1350,12 +1333,15 @@ minutes, seconds, _ = timer(diff, processed)
 
 os.makedirs(output_dir, exist_ok=True)
 previous_snapshot = {}
+baseline_source = ''
 if mode == 'temporal':
     baseline_dir = temporal_baseline
-    if baseline_dir and snapshot_exists(baseline_dir):
-        previous_snapshot = load_previous_snapshot(baseline_dir)
-    elif snapshot_exists(output_dir):
-        previous_snapshot = load_previous_snapshot(output_dir)
+    if baseline_dir and snapshot_exists(baseline_dir, dataset_names):
+        previous_snapshot = load_previous_snapshot(baseline_dir, dataset_names)
+        baseline_source = baseline_dir
+    elif snapshot_exists(output_dir, dataset_names):
+        previous_snapshot = load_previous_snapshot(output_dir, dataset_names)
+        baseline_source = output_dir
 artifact_genealogy_placeholder = set()
 datasets = [
     list(files), list(forms), list(intel), list(robots), list(custom), ordered_url_values(failed, state='failed'), list(skipped), ordered_redirect_values(redirects), ordered_url_values(internal),
@@ -1363,15 +1349,6 @@ datasets = [
     list(document_metadata), list(document_leaks), list(js_intel), list(threads), list(locations), list(stories), list(hidden_paths), list(scam_signals), list(temporal_diffs),
     list(site_anatomy), list(mutation_probes), list(artifact_genealogy_placeholder),
 ]
-if mode == 'temporal' and previous_snapshot:
-    current_snapshot = {
-        name: sorted(dataset)
-        for name, dataset in zip(dataset_names, datasets)
-    }
-    current_snapshot['stats'] = stats.snapshot(visited=len(processed))
-    temporal_diffs.update(build_temporal_diffs(previous_snapshot, current_snapshot))
-elif mode == 'temporal':
-    temporal_diffs.add('dataset=temporal_diffs change=baseline-missing value=No prior snapshot found')
 
 datasets_dict = {
     'files': sorted(files),
@@ -1423,6 +1400,34 @@ datasets_dict['mutation_probes'] = sorted(mutation_probes)
 datasets_dict['artifact_genealogy'] = sorted(artifact_genealogy_lines)
 datasets_dict['stats'] = stats_summary
 
+command = [sys.executable, os.path.abspath(__file__), *sys.argv[1:]]
+report_config = RuntimeConfig.from_mapping({
+    **runtime_config.as_dict(),
+    'ritual_chain': ritual_chain,
+    'mode': mode,
+    'preset': preset,
+    'temporal_baseline': baseline_source or temporal_baseline or '',
+    'scope_allow': [pattern.pattern for pattern in scope_allow],
+    'scope_deny': [pattern.pattern for pattern in scope_deny],
+    'resume': args.resume or '',
+    'checkpoint': checkpoint_path or '',
+    'host': host,
+    'domain': domain,
+    'verbose': verbose,
+})
+run_id = f'run-{int(then)}-{os.getpid()}'
+run_metadata = build_run_metadata(
+    run_id=run_id,
+    preset=preset,
+    mode=mode,
+    ritual_chain=ritual_chain,
+    command=command,
+    runtime_config=report_config,
+    baseline_source=baseline_source,
+    output_dir=output_dir,
+)
+export_names = ['autopsy.json', 'autopsy.md', 'stats.txt', TEMPORAL_BASELINE_FILE, *([f'results.{args.export}'] if args.export else [])]
+
 print(f'\n{dark_red}{"─" * 60}{end}')
 print(f'{blood}Harvest summary{end}')
 for dataset, name in zip(datasets, dataset_names):
@@ -1440,7 +1445,7 @@ if diff > 0:
 print(f'{fang}Redirects       {stats_summary["redirects"]}')
 print(f'{fang}Skipped         {stats_summary["skipped"]}')
 print(f'{fang}Failures        {stats_summary["failures"]}')
-print(f'{fang}Exported        {len(dataset_names) + 3}')
+print(f'{fang}Exported        {len(dataset_names) + 4}')
 print(f'{fang}Top types       {", ".join(f"{name}:{count}" for name, count in top_content_types) or "-"}')
 
 if args.dns:
@@ -1478,37 +1483,93 @@ autopsy = build_autopsy(
     genealogy=artifact_genealogy,
     anatomy=site_anatomy_map,
     mutation_probes=mutation_probe_records,
-    exports=['autopsy.json', 'autopsy.md', 'stats.txt', *([f'results.{args.export}'] if args.export else [])],
+    exports=export_names,
     duration_seconds=diff,
     content_types=content_types,
+    run_metadata=run_metadata,
 )
 autopsy_json_path, autopsy_md_path = write_autopsy_files(output_dir, autopsy)
-print(f'{fang}Autopsy JSON    {autopsy_json_path}')
-print(f'{fang}Autopsy MD      {autopsy_md_path}')
 manifest = build_crawl_manifest(
     specimen=specimen_profile,
     ritual=ritual_plan,
     preset=preset,
     mode=mode,
-    command=[sys.executable, os.path.abspath(__file__), *sys.argv[1:]],
+    command=command,
     output_dir=output_dir,
     main_url=main_url,
-    resolved_config={
-        **resolved_config,
-        'ritual_chain': ritual_chain,
-        'host': host,
-        'domain': domain,
-        'scope_allow': [pattern.pattern for pattern in scope_allow],
-        'scope_deny': [pattern.pattern for pattern in scope_deny],
-        'resume': args.resume or '',
-        'checkpoint': checkpoint_path or '',
-    },
+    resolved_config=report_config.as_dict(),
     checkpoint_path=checkpoint_path,
     resumed_from=args.resume,
-    temporal_baseline=temporal_baseline,
+    temporal_baseline=baseline_source or temporal_baseline,
+    run_metadata=run_metadata,
 )
 manifest_path = write_manifest_file(output_dir, manifest)
+
+if mode == 'temporal' and previous_snapshot:
+    temporal_diffs = build_temporal_diffs(
+        previous_snapshot,
+        build_structured_snapshot(
+            dataset_names=dataset_names,
+            datasets=datasets_dict,
+            stats=stats_summary,
+            autopsy=autopsy,
+            manifest=manifest,
+            content_types=content_types,
+        ),
+    )
+elif mode == 'temporal':
+    temporal_diffs = {'dataset=temporal_diffs change=baseline-missing value=No prior snapshot found'}
+
+if mode == 'temporal':
+    datasets_dict['temporal_diffs'] = sorted(temporal_diffs)
+    writer([datasets_dict['temporal_diffs']], ['temporal_diffs'], output_dir)
+    autopsy = build_autopsy(
+        specimen=specimen_profile,
+        ritual=ritual_plan,
+        preset=preset,
+        mode=mode,
+        datasets=datasets_dict,
+        stats=stats_summary,
+        genealogy=artifact_genealogy,
+        anatomy=site_anatomy_map,
+        mutation_probes=mutation_probe_records,
+        exports=export_names,
+        duration_seconds=diff,
+        content_types=content_types,
+        run_metadata=run_metadata,
+    )
+    autopsy_json_path, autopsy_md_path = write_autopsy_files(output_dir, autopsy)
+    manifest = build_crawl_manifest(
+        specimen=specimen_profile,
+        ritual=ritual_plan,
+        preset=preset,
+        mode=mode,
+        command=command,
+        output_dir=output_dir,
+        main_url=main_url,
+        resolved_config=report_config.as_dict(),
+        checkpoint_path=checkpoint_path,
+        resumed_from=args.resume,
+        temporal_baseline=baseline_source or temporal_baseline,
+        run_metadata=run_metadata,
+    )
+    manifest_path = write_manifest_file(output_dir, manifest)
+
+snapshot_path = write_structured_snapshot_file(
+    output_dir,
+    build_structured_snapshot(
+        dataset_names=dataset_names,
+        datasets=datasets_dict,
+        stats=stats_summary,
+        autopsy=autopsy,
+        manifest=manifest,
+        content_types=content_types,
+    ),
+)
+print(f'{fang}Autopsy JSON    {autopsy_json_path}')
+print(f'{fang}Autopsy MD      {autopsy_md_path}')
 print(f'{fang}Manifest        {manifest_path}')
+print(f'{fang}Baseline        {snapshot_path}')
 
 write_checkpoint('complete')
 print(f'\n{blood}The harvest is complete. Loot interred in {bold}{green}{output_dir}{end}')

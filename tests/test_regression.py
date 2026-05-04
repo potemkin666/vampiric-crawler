@@ -579,11 +579,24 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('https://example.com/admin', hidden_candidates)
 
         diffs = build_temporal_diffs(
-            {'internal': ['https://example.com/old'], 'stats': {'visited': 1}},
-            {'internal': ['https://example.com/new'], 'stats': {'visited': 2}},
+            {
+                'internal': ['https://example.com/old'],
+                'stats': {'visited': 1},
+                'artifact_genealogy': {
+                    'https://example.com/report.pdf': {'sha256': 'oldhash', 'content_type': 'application/pdf'},
+                },
+            },
+            {
+                'internal': ['https://example.com/new'],
+                'stats': {'visited': 2},
+                'artifact_genealogy': {
+                    'https://example.com/report.pdf': {'sha256': 'newhash', 'content_type': 'application/pdf'},
+                },
+            },
         )
         self.assertTrue(any('change=added value=https://example.com/new' in item for item in diffs))
         self.assertTrue(any('metric=visited before=1 after=2' in item for item in diffs))
+        self.assertTrue(any('dataset=artifact_genealogy item=https://example.com/report.pdf field=sha256 before=oldhash after=newhash' in item for item in diffs))
 
     def test_launch_script_prompts_for_url_when_started_without_args(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -790,6 +803,7 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(manifest['lineage']['checkpoint_path'], '')
                 self.assertIn('autopsy.json', manifest['artifacts'])
                 self.assertIn('results.json', manifest['artifacts'])
+                self.assertIn('run_metadata', manifest)
 
                 with open(os.path.join(output_dir, 'robots.txt'), 'r', encoding='utf-8') as handle:
                     robots = handle.read()
@@ -863,6 +877,17 @@ class RegressionTests(unittest.TestCase):
                 self.assertIn('site_anatomy', autopsy)
                 self.assertIn('mutation_engine', autopsy)
                 self.assertIn('artifact_genealogy', autopsy)
+                self.assertIn('run_metadata', autopsy)
+                self.assertEqual(autopsy['run_metadata']['run_id'], manifest['run_metadata']['run_id'])
+                self.assertIn('saved_at', autopsy['run_metadata'])
+                self.assertIn('command_line', autopsy['run_metadata'])
+                self.assertIn('python_version', autopsy['run_metadata']['runtime'])
+
+                with open(os.path.join(output_dir, 'temporal-baseline.json'), 'r', encoding='utf-8') as handle:
+                    structured_snapshot = json.load(handle)
+                self.assertIn('artifact_genealogy', structured_snapshot)
+                self.assertIn('content_types', structured_snapshot)
+                self.assertIn('report_metadata', structured_snapshot)
 
                 with open(os.path.join(output_dir, 'site_anatomy.txt'), 'r', encoding='utf-8') as handle:
                     anatomy = handle.read()
@@ -976,11 +1001,53 @@ class RegressionTests(unittest.TestCase):
                 os.makedirs(baseline_dir)
                 Path(baseline_dir, 'internal.txt').write_text(server.base_url + '/old\n', encoding='utf-8')
                 Path(baseline_dir, 'stats.txt').write_text('visited=1\n', encoding='utf-8')
+                Path(baseline_dir, 'autopsy.json').write_text(json.dumps({
+                    'artifact_genealogy': {
+                        server.base_url + '/report.pdf': {
+                            'sha256': 'oldhash',
+                            'content_type': 'application/pdf',
+                            'size': 12,
+                            'archive_presence': False,
+                        },
+                    },
+                    'run_summary': {
+                        'top_content_types': [['text/html', 1]],
+                    },
+                    'run_metadata': {
+                        'command_line': 'python old-run',
+                        'baseline_source': baseline_dir,
+                        'flags': {'render_js': True},
+                        'runtime': {'python_version': '3.11.0', 'git_commit': 'deadbeef'},
+                    },
+                    'what_the_target_is': {
+                        'mode': 'temporal',
+                        'preset': 'balanced',
+                        'ritual_chain': 'dead_page_resurrection',
+                    },
+                }), encoding='utf-8')
+                Path(baseline_dir, 'crawl-manifest.json').write_text(json.dumps({
+                    'target': {
+                        'mode': 'temporal',
+                        'preset': 'balanced',
+                        'ritual_chain': 'dead_page_resurrection',
+                    },
+                    'artifacts': {
+                        'autopsy.json': {'sha256': 'manifesthash', 'size': 111},
+                    },
+                    'run_metadata': {
+                        'command_line': 'python old-run',
+                        'baseline_source': baseline_dir,
+                        'flags': {'render_js': True},
+                        'runtime': {'python_version': '3.11.0', 'git_commit': 'deadbeef'},
+                    },
+                }), encoding='utf-8')
                 temporal_output = os.path.join(tmpdir, 'temporal')
                 run_mode('temporal', temporal_output, ['--temporal-baseline', baseline_dir])
                 temporal_text = Path(temporal_output, 'temporal_diffs.txt').read_text(encoding='utf-8')
                 self.assertIn('change=removed value=' + server.base_url + '/old', temporal_text)
                 self.assertIn('metric=visited before=1', temporal_text)
+                self.assertIn('dataset=artifact_genealogy item=' + server.base_url + '/report.pdf field=sha256', temporal_text)
+                self.assertIn('dataset=report_metadata metric=command_line before=python old-run', temporal_text)
         finally:
             server.shutdown()
             server.server_close()
@@ -1190,6 +1257,7 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(manifest_response.status_code, 200)
                 manifest_payload = json.loads(manifest_response.get_data(as_text=True))
                 self.assertEqual(manifest_payload['target']['main_url'], 'https://example.com')
+                self.assertEqual(manifest_payload['run_metadata']['run_id'], 'sealed-record')
                 manifest_response.close()
 
                 bundle_response = client.get('/api/exports/bundle')
