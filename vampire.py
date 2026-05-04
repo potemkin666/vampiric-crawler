@@ -52,6 +52,7 @@ from core.autopsy import (
     load_previous_snapshot,
     mutation_lines,
     record_artifact_discovery,
+    restore_genealogy,
     snapshot_exists,
     update_artifact_observation,
     write_autopsy_files,
@@ -506,7 +507,7 @@ if resume_state:
     processed.update(restored['processed'])
     bad_scripts.update(restored['bad_scripts'])
     bad_intel.update(restored['bad_intel'])
-    artifact_genealogy.update(normalize_checkpoint_mapping(resume_state, 'artifact_genealogy'))
+    artifact_genealogy.update(restore_genealogy(normalize_checkpoint_mapping(resume_state, 'artifact_genealogy')))
     content_types.update(normalize_checkpoint_mapping(resume_state, 'content_types'))
     stats = CrawlStats.from_snapshot(resume_state.get('stats'))
     restored_queue_state = normalize_checkpoint_mapping(resume_state, 'queue_state')

@@ -134,6 +134,34 @@ def finalize_genealogy(genealogy: dict[str, dict[str, object]]) -> dict[str, dic
     return finalized
 
 
+def restore_genealogy(genealogy: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Return checkpointed genealogy data with set-backed fields restored."""
+    restored: dict[str, dict[str, object]] = {}
+    if not isinstance(genealogy, dict):
+        return restored
+    for url, record in genealogy.items():
+        if not isinstance(record, dict):
+            continue
+        restored[str(url)] = {
+            'url': str(record.get('url') or url),
+            'found_on': set(record.get('found_on') or ()),
+            'linked_by': set(record.get('linked_by') or ()),
+            'source_kinds': set(record.get('source_kinds') or ()),
+            'content_type': str(record.get('content_type') or ''),
+            'size': int(record.get('size') or 0),
+            'sha256': str(record.get('sha256') or ''),
+            'title': str(record.get('title') or ''),
+            'metadata': set(record.get('metadata') or ()),
+            'archive_presence': bool(record.get('archive_presence')),
+            'duplicates': set(record.get('duplicates') or ()),
+            'redirects': set(record.get('redirects') or ()),
+            'first_seen': str(record.get('first_seen') or ''),
+            'last_seen': str(record.get('last_seen') or ''),
+            'notes': set(record.get('notes') or ()),
+        }
+    return restored
+
+
 def genealogy_lines(genealogy: dict[str, dict[str, object]]) -> list[str]:
     """Return compact artifact genealogy lines."""
     lines = []
