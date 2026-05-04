@@ -1,6 +1,7 @@
 const state = {
   status: 'idle',
   timer: null,
+  viewRunId: null,
   lastFeedKey: '',
   sortKey: 'discovery_time',
   lastState: null,
@@ -80,6 +81,7 @@ const els = {
   inputKind: document.getElementById('inputKind'),
   crawlMode: document.getElementById('crawlMode'),
   hiddenWords: document.getElementById('hiddenWords'),
+  temporalBaseline: document.getElementById('temporalBaseline'),
   depth: document.getElementById('depth'),
   threads: document.getElementById('threads'),
   delay: document.getElementById('delay'),
@@ -155,6 +157,7 @@ function formPayload() {
     enumerate_subdomains: els.dns.checked,
     dry_run: els.dryRun.checked,
     hidden_words: els.hiddenWords.value.trim(),
+    temporal_baseline: els.temporalBaseline.value.trim(),
   };
 }
 
@@ -173,6 +176,7 @@ async function renderCommandPreview() {
       `Depth=${resolved.depth} Threads=${resolved.threads} Delay=${resolved.delay} Timeout=${resolved.timeout}`,
       `Flags: scope=${resolved.scope} render=${resolved.render_js} archive=${resolved.archive_seeds} dns=${resolved.enumerate_subdomains} dry=${resolved.dry_run}`,
       `Shadow words: ${(resolved.hidden_words || []).join(', ') || '-'}`,
+      `Temporal baseline: ${resolved.temporal_baseline || '-'}`,
     ].join('\n');
   } catch (error) {
     els.commandPreview.textContent = `> CRAWL ${payload.target_specimen || 'https://example.com'} --depth ${payload.depth}`;
@@ -298,15 +302,33 @@ function renderExports(data) {
 function renderRecords(data) {
   const records = data.sealed_records || [];
   els.sealedRecords.innerHTML = records.length
-    ? records.map((record) => `
-      <div class="record-card">
-        <div class="panel-title">${escapeHtml(record.status_message || record.status)}</div>
-        <strong>${escapeHtml(record.target_url || record.id)}</strong>
-        <div>${escapeHtml(record.mode || 'generic')} // ${escapeHtml(record.status || '')}</div>
-        <div>${escapeHtml(record.ended_at || '')}</div>
-      </div>
-    `).join('')
+    ? [
+      data.is_historical ? '<button type="button" class="terminal-button record-open" data-run-id="">> RETURN TO CURRENT RITE</button>' : '',
+      ...records.map((record) => `
+       <div class="record-card">
+         <div class="panel-title">${escapeHtml(record.status_message || record.status)}</div>
+         <strong>${escapeHtml(record.target_url || record.id)}</strong>
+         <div>${escapeHtml(record.mode || 'generic')} // ${escapeHtml(record.status || '')}</div>
+         <div>${escapeHtml(record.ended_at || '')}</div>
+         <div class="result-link-list">
+           <button type="button" class="terminal-button record-open" data-run-id="${escapeHtml(record.id || '')}">REOPEN RECORD</button>
+           ${(record.exports || []).map((item) => `<a class="result-link" href="${escapeHtml(item.href)}">${escapeHtml(item.kind)}</a>`).join(' ')}
+         </div>
+       </div>
+      `),
+    ].join('')
     : '<span class="empty-note">NO SEALED RECORDS YET</span>';
+  els.sealedRecords.querySelectorAll('.record-open').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const runId = button.dataset.runId || '';
+      if (!runId) {
+        state.viewRunId = null;
+        refreshState();
+        return;
+      }
+      await openSealedRecord(runId);
+    });
+  });
 }
 
 function renderPauseState(data) {
@@ -456,6 +478,7 @@ function renderResultLedger(data) {
 
 function renderState(data) {
   state.lastState = data;
+  state.viewRunId = data.is_historical ? (data.id || null) : null;
   state.status = data.status || 'idle';
   els.app.dataset.status = state.status;
   els.statusMessage.textContent = data.status_message || 'THE CRAWLER SLEEPS';
@@ -495,7 +518,19 @@ async function postJson(url, payload = {}) {
 
 async function refreshState() {
   try {
-    const response = await fetch('/api/state');
+    const endpoint = state.viewRunId ? `/api/runs/${encodeURIComponent(state.viewRunId)}` : '/api/state';
+    const response = await fetch(endpoint);
+    const data = await response.json();
+    renderState(data);
+  } catch (error) {
+    els.errorConsole.textContent = String(error.message || error);
+  }
+}
+
+async function openSealedRecord(runId) {
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
+    if (!response.ok) throw new Error('The sealed record could not be reopened.');
     const data = await response.json();
     renderState(data);
   } catch (error) {

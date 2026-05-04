@@ -319,6 +319,8 @@ def command_preview(payload: dict[str, Any]) -> str:
         preview += ' --dns'
     if runtime_config.dry_run:
         preview += ' --dry-run'
+    if runtime_config.temporal_baseline:
+        preview += f' --temporal-baseline {runtime_config.temporal_baseline}'
     if runtime_config.hidden_words:
         preview += f' --hidden-word {runtime_config.hidden_words[0]}'
     return preview.strip()
@@ -484,6 +486,7 @@ class CrawlRun:
             'panels': build_panels(self.payload, datasets, stats),
             'exports': build_exports(self.output_dir),
             'sealed_records': history,
+            'is_historical': False,
         }
 
 
@@ -556,6 +559,101 @@ def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
             'queued_urls': [str(item) for item in (sitemap_metadata.get('queued_urls') or [])],
         }
     return metadata
+
+
+def read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open('r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_saved_run_payload(output_dir: Path, checkpoint_path: Path, history_entry: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    manifest = read_json_file(output_dir / 'crawl-manifest.json')
+    target = manifest.get('target') if isinstance(manifest.get('target'), dict) else {}
+    resolved_config = manifest.get('resolved_config') if isinstance(manifest.get('resolved_config'), dict) else {}
+    lineage = manifest.get('lineage') if isinstance(manifest.get('lineage'), dict) else {}
+    if target:
+        payload.update(resolved_config)
+        payload.update({
+            'target_url': str(target.get('main_url') or ''),
+            'target_specimen': str(target.get('main_url') or ''),
+            'specimen': target.get('specimen') or {},
+            'ritual_chain': str(target.get('ritual_chain') or ''),
+            'ritual_label': str(target.get('ritual_label') or ''),
+            'preset': str(target.get('preset') or payload.get('preset') or 'balanced'),
+            'mode': str(target.get('mode') or payload.get('mode') or 'generic'),
+            'temporal_baseline': str(lineage.get('temporal_baseline') or ''),
+        })
+
+    checkpoint = read_json_file(checkpoint_path)
+    if checkpoint:
+        payload.setdefault('target_url', str(checkpoint.get('main_url') or ''))
+        payload.setdefault('target_specimen', str(checkpoint.get('specimen_input') or payload.get('target_url') or ''))
+        payload.setdefault('specimen', checkpoint.get('specimen_profile') or {})
+        payload.setdefault('ritual_chain', str(checkpoint.get('ritual_chain') or ''))
+        payload.setdefault('preset', str(checkpoint.get('preset') or payload.get('preset') or 'balanced'))
+        payload.setdefault('mode', str(checkpoint.get('mode') or payload.get('mode') or 'generic'))
+        payload.setdefault('output_dir', str(checkpoint.get('output_dir') or output_dir))
+
+    if history_entry:
+        payload.setdefault('target_url', str(history_entry.get('target_url') or ''))
+        payload.setdefault('target_specimen', str(history_entry.get('target_url') or payload.get('target_url') or ''))
+        payload.setdefault('mode', str(history_entry.get('mode') or payload.get('mode') or 'generic'))
+
+    payload.setdefault('target_url', '')
+    payload.setdefault('target_specimen', payload.get('target_url', ''))
+    payload.setdefault('preset', 'balanced')
+    payload.setdefault('mode', 'generic')
+    return payload
+
+
+def build_saved_run_snapshot(run_id: str, output_dir: Path, checkpoint_path: Path, history: list[dict[str, Any]], history_entry: dict[str, Any] | None = None) -> dict[str, Any]:
+    datasets, stats = collect_run_artifacts(output_dir, checkpoint_path)
+    checkpoint_meta = load_checkpoint_metadata(checkpoint_path)
+    payload = load_saved_run_payload(output_dir, checkpoint_path, history_entry)
+    exports = build_exports(output_dir, run_id=run_id)
+    status = str((history_entry or {}).get('status') or ('complete' if any(datasets.values()) or stats else 'empty'))
+    return {
+        'id': run_id,
+        'status': status,
+        'status_message': STATUS_MESSAGES.get(status, STATUS_MESSAGES['idle']),
+        'status_detail': 'SEALED RECORD REOPENED',
+        'target_url': payload.get('target_url', ''),
+        'target_specimen': payload.get('target_specimen', payload.get('target_url', '')),
+        'specimen_type': payload.get('specimen', {}).get('type', 'url'),
+        'ritual_chain': coerce_ritual_chain(payload.get('ritual_chain')),
+        'ritual_label': payload.get('ritual_label', ''),
+        'preset': coerce_preset(payload.get('preset')),
+        'mode': coerce_mode(payload.get('mode')),
+        'mode_label': mode_label(payload.get('mode', 'generic')),
+        'mode_description': mode_description(payload.get('mode', 'generic')),
+        'command_preview': command_preview(payload) if (payload.get('target_specimen') or payload.get('target_url')) else 'CRAWL --sealed-record',
+        'command': [],
+        'started_at': None,
+        'ended_at': (history_entry or {}).get('ended_at'),
+        'output_dir': str(output_dir),
+        'can_pause': False,
+        'can_resume': False,
+        'can_stop': False,
+        'logs': [],
+        'feed': [],
+        'errors': [],
+        'queue': checkpoint_meta['queue'],
+        'robots_details': checkpoint_meta['robots'],
+        'sitemap_details': checkpoint_meta['sitemap'],
+        'result_rows': build_result_rows(checkpoint_meta['results'], redirect_lines=datasets.get('redirects', []), exports=exports),
+        'summary': build_summary(payload, datasets, stats),
+        'panels': build_panels(payload, datasets, stats),
+        'exports': exports,
+        'sealed_records': history,
+        'is_historical': True,
+    }
 
 
 def build_result_rows(
@@ -722,7 +820,7 @@ def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats:
     return selected
 
 
-def build_exports(output_dir: Path) -> list[dict[str, str]]:
+def build_exports(output_dir: Path, run_id: str | None = None) -> list[dict[str, str]]:
     files = (
         ('json', 'EXPORT JSON', output_dir / 'results.json'),
         ('csv', 'EXPORT CSV', output_dir / 'results.csv'),
@@ -731,8 +829,9 @@ def build_exports(output_dir: Path) -> list[dict[str, str]]:
         ('manifest-json', 'CRAWL MANIFEST', output_dir / 'crawl-manifest.json'),
         ('bundle', 'EXPORT BUNDLE', output_dir / 'sealed-bundle.zip'),
     )
+    href_prefix = f'/api/runs/{run_id}/exports' if run_id else '/api/exports'
     return [
-        {'kind': kind, 'label': label, 'href': f'/api/exports/{kind}'}
+        {'kind': kind, 'label': label, 'href': f'{href_prefix}/{kind}'}
         for kind, label, path in files
         if path.exists()
     ]
@@ -897,9 +996,7 @@ class CrawlManager:
                 run_id = f'{base_run_id}-{suffix}'
             output_dir = self.runs_root / run_id
             if payload['mode'] == 'temporal' and not payload.get('temporal_baseline'):
-                baseline = self._latest_baseline(payload.get('target_url', ''), exclude_dir=output_dir)
-                if baseline is not None:
-                    payload['temporal_baseline'] = str(baseline.resolve())
+                raise ValueError('Temporal mode requires an explicit baseline path.')
             output_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_path = output_dir / 'checkpoint.json'
             command = build_crawl_command(payload, output_dir, checkpoint_path)
@@ -926,19 +1023,6 @@ class CrawlManager:
             thread = threading.Thread(target=self._monitor_run, args=(run,), daemon=True)
             thread.start()
             return run
-
-    def _latest_baseline(self, target_url: str, exclude_dir: Path | None = None) -> Path | None:
-        target_slug = slugify_target(target_url)
-        candidates = []
-        for entry in self.runs_root.iterdir():
-            if not entry.is_dir() or target_slug not in entry.name:
-                continue
-            if exclude_dir is not None and entry == exclude_dir:
-                continue
-            if self.current_run and entry == self.current_run.output_dir:
-                continue
-            candidates.append(entry)
-        return sorted(candidates)[-1] if candidates else None
 
     def _monitor_run(self, run: CrawlRun) -> None:
         assert run.process is not None
@@ -969,6 +1053,9 @@ class CrawlManager:
             'ended_at': run.ended_at,
             'status': run.status,
             'status_message': STATUS_MESSAGES.get(run.status, STATUS_MESSAGES['idle']),
+            'output_dir': str(run.output_dir),
+            'state_href': f'/api/runs/{run.run_id}',
+            'exports': build_exports(run.output_dir, run_id=run.run_id),
         })
 
     def pause(self) -> CrawlRun:
@@ -1031,6 +1118,7 @@ class CrawlManager:
                 'panels': build_panels({}, {}, {}),
                 'exports': [],
                 'sealed_records': list(self.history),
+                'is_historical': False,
                 'can_pause': False,
                 'can_resume': False,
                 'can_stop': False,
@@ -1043,20 +1131,56 @@ class CrawlManager:
         run = self.current_run
         if not run:
             raise FileNotFoundError('No sealed record available.')
-        if run.status == 'complete':
-            ensure_exports(run)
+        return self.export_path_for_run(run.run_id, kind)
+
+    def run_state(self, run_id: str) -> dict[str, Any]:
+        if self.current_run and self.current_run.run_id == run_id:
+            if self.current_run.status == 'complete':
+                ensure_exports(self.current_run)
+            return self.current_run.snapshot(list(self.history))
+        history = list(self.history)
+        history_entry = next((item for item in history if item.get('id') == run_id), None)
+        output_dir = self._run_dir(run_id, history_entry)
+        checkpoint_path = output_dir / 'checkpoint.json'
+        return build_saved_run_snapshot(run_id, output_dir, checkpoint_path, history, history_entry)
+
+    def export_path_for_run(self, run_id: str, kind: str) -> Path:
+        if self.current_run and self.current_run.run_id == run_id:
+            run = self.current_run
+            if run.status == 'complete':
+                ensure_exports(run)
+            output_dir = run.output_dir
+        else:
+            history_entry = next((item for item in self.history if item.get('id') == run_id), None)
+            output_dir = self._run_dir(run_id, history_entry)
         mapping = {
-            'json': run.output_dir / 'results.json',
-            'csv': run.output_dir / 'results.csv',
-            'autopsy-json': run.output_dir / 'autopsy.json',
-            'autopsy-md': run.output_dir / 'autopsy.md',
-            'manifest-json': run.output_dir / 'crawl-manifest.json',
-            'bundle': run.output_dir / 'sealed-bundle.zip',
+            'json': output_dir / 'results.json',
+            'csv': output_dir / 'results.csv',
+            'autopsy-json': output_dir / 'autopsy.json',
+            'autopsy-md': output_dir / 'autopsy.md',
+            'manifest-json': output_dir / 'crawl-manifest.json',
+            'bundle': output_dir / 'sealed-bundle.zip',
         }
         path = mapping.get(kind)
         if path is None or not path.exists():
             raise FileNotFoundError(kind)
         return path
+
+    def _run_dir(self, run_id: str, history_entry: dict[str, Any] | None = None) -> Path:
+        if not re.fullmatch(r'[A-Za-z0-9._-]+', run_id or ''):
+            raise FileNotFoundError(run_id)
+        candidate = (history_entry or {}).get('output_dir') or (self.runs_root / run_id)
+        path = Path(candidate).resolve()
+        allowed_root = self.runs_root.resolve()
+        if path == allowed_root:
+            raise FileNotFoundError(run_id)
+        if path.exists() and path.is_dir() and (path.parent == allowed_root or str(path).startswith(str(allowed_root) + os.sep)):
+            return path
+        fallback = (self.runs_root / run_id).resolve()
+        if fallback.exists() and fallback.is_dir() and fallback.parent == allowed_root:
+            return fallback
+        else:
+            raise FileNotFoundError(run_id)
 
     def _active_run(self, allow_paused: bool = False) -> CrawlRun:
         run = self.current_run
@@ -1115,7 +1239,7 @@ def create_app(runs_root: Path | None = None) -> Flask:
         try:
             run = app.config['CRAWL_MANAGER'].start(payload)
         except ValueError as exc:
-            return error_response('The target specimen is malformed.', 400, exc)
+            return error_response(str(exc) or 'The target specimen is malformed.', 400, exc)
         except RuntimeError as exc:
             return error_response('Another crawl rite is already active.', 409, exc)
         return jsonify(run.snapshot(list(app.config['CRAWL_MANAGER'].history))), 202
@@ -1148,6 +1272,22 @@ def create_app(runs_root: Path | None = None) -> Flask:
     def export(kind: str) -> Any:
         try:
             path = app.config['CRAWL_MANAGER'].export_path(kind)
+        except FileNotFoundError:
+            abort(404)
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.get('/api/runs/<run_id>')
+    def run_state(run_id: str) -> Any:
+        try:
+            snapshot = app.config['CRAWL_MANAGER'].run_state(run_id)
+        except FileNotFoundError:
+            abort(404)
+        return jsonify(snapshot)
+
+    @app.get('/api/runs/<run_id>/exports/<kind>')
+    def run_export(run_id: str, kind: str) -> Any:
+        try:
+            path = app.config['CRAWL_MANAGER'].export_path_for_run(run_id, kind)
         except FileNotFoundError:
             abort(404)
         return send_file(path, as_attachment=True, download_name=path.name)

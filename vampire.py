@@ -225,11 +225,17 @@ core.config.verbose = args.verbose
 verbose = args.verbose
 cook = args.cook or None
 checkpoint_path = args.checkpoint or args.resume
-temporal_baseline = args.temporal_baseline
+temporal_baseline = args.temporal_baseline or (resume_state.get('temporal_baseline') if resume_state else '')
 
 
 def cli_arg_present(*names):
     return any(name in sys.argv[1:] for name in names)
+
+
+def default_output_dir_name(host_name, mode_name):
+    base = re.sub(r'[^a-z0-9]+', '-', (host_name or 'specimen').lower()).strip('-') or 'specimen'
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+    return os.path.join('sealed-runs', f'{stamp}-{base}-{coerce_mode(mode_name)}')
 
 
 specimen_kind = (
@@ -396,6 +402,14 @@ if not main_url and not (direct_local_html or direct_local_js or direct_local_pd
         print(f'{coffin}The chosen specimen was classified as {specimen_profile.get("type")} but could not be normalized into a crawlable URL.')
         sys.exit(1)
 
+if mode == 'temporal':
+    if not temporal_baseline:
+        print(f'{coffin}Temporal mode requires an explicit --temporal-baseline path.')
+        sys.exit(1)
+    if not snapshot_exists(temporal_baseline, dataset_names):
+        print(f'{coffin}Temporal baseline not found or empty: {temporal_baseline}')
+        sys.exit(1)
+
 if args.dry_run:
     print(f'{fang}Dry run — no requests will be made.')
     print(f'{fang}Specimen type   {specimen_profile.get("type")}')
@@ -422,7 +436,7 @@ try:
     domain = top_level(main_url)
 except Exception:
     domain = host
-output_dir = args.output or (resume_state.get('output_dir') if resume_state else None) or (host or 'specimen')
+output_dir = args.output or (resume_state.get('output_dir') if resume_state else None) or default_output_dir_name(host, mode)
 
 if args.user_agent:
     user_agents = [ua.strip() for ua in args.user_agent.split(',') if ua.strip()]
@@ -748,6 +762,7 @@ def checkpoint_payload(stage):
         'domain': domain,
         'scope_mode': scope_mode,
         'mode': mode,
+        'temporal_baseline': temporal_baseline or '',
         'output_dir': output_dir,
         'stats': stats.snapshot(visited=len(processed)),
         'content_types': content_types,
@@ -1360,12 +1375,8 @@ previous_snapshot = {}
 baseline_source = ''
 if mode == 'temporal':
     baseline_dir = temporal_baseline
-    if baseline_dir and snapshot_exists(baseline_dir, dataset_names):
-        previous_snapshot = load_previous_snapshot(baseline_dir, dataset_names)
-        baseline_source = baseline_dir
-    elif snapshot_exists(output_dir, dataset_names):
-        previous_snapshot = load_previous_snapshot(output_dir, dataset_names)
-        baseline_source = output_dir
+    previous_snapshot = load_previous_snapshot(baseline_dir, dataset_names)
+    baseline_source = baseline_dir
 artifact_genealogy_placeholder = set()
 datasets = [
     list(files), list(forms), list(intel), list(robots), list(custom), ordered_url_values(failed, state='failed'), list(skipped), ordered_redirect_values(redirects), ordered_url_values(internal),

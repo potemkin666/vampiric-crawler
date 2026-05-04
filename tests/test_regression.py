@@ -1066,6 +1066,62 @@ class RegressionTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test_cli_default_output_dir_uses_timestamped_run_folder(self):
+        FixtureHandler.header_failures = []
+        FixtureHandler.flaky_hits = 0
+
+        server = ThreadedHTTPServer(('127.0.0.1', 0), FixtureHandler)
+        server.base_url = 'http://127.0.0.1:{}'.format(server.server_port)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        os.path.join(REPO_ROOT, 'vampire.py'),
+                        '-u', server.base_url,
+                        '-l', '0',
+                        '-t', '1',
+                        '--timeout', '2',
+                    ],
+                    cwd=tmpdir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, msg=result.stderr)
+                runs_root = Path(tmpdir, 'sealed-runs')
+                run_dirs = [item for item in runs_root.iterdir() if item.is_dir()]
+                self.assertEqual(len(run_dirs), 1)
+                self.assertTrue(run_dirs[0].name.endswith('-generic'))
+                self.assertTrue(Path(run_dirs[0], 'stats.txt').exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_temporal_mode_requires_explicit_baseline(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(REPO_ROOT, 'vampire.py'),
+                '--target', 'example.com',
+                '--mode', 'temporal',
+                '--dry-run',
+            ],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Temporal mode requires an explicit --temporal-baseline path.', result.stdout)
+
     def test_cli_can_resume_from_checkpoint(self):
         FixtureHandler.header_failures = []
         FixtureHandler.flaky_hits = 0
@@ -1278,6 +1334,42 @@ class RegressionTests(unittest.TestCase):
                 bundle_response = client.get('/api/exports/bundle')
                 self.assertEqual(bundle_response.status_code, 200)
                 bundle_response.close()
+
+                manager.current_run = None
+                manager.history.appendleft({
+                    'id': 'sealed-record',
+                    'target_url': 'https://example.com',
+                    'mode': 'document',
+                    'ended_at': '2026-05-03T09:16:06+00:00',
+                    'status': 'complete',
+                    'status_message': 'CRAWL SEALED',
+                    'output_dir': str(output_dir),
+                    'state_href': '/api/runs/sealed-record',
+                    'exports': [],
+                })
+                historical_response = client.get('/api/runs/sealed-record')
+                self.assertEqual(historical_response.status_code, 200)
+                historical_payload = historical_response.get_json()
+                self.assertTrue(historical_payload['is_historical'])
+                self.assertEqual(historical_payload['id'], 'sealed-record')
+                self.assertTrue(any(item['href'].startswith('/api/runs/sealed-record/exports/') for item in historical_payload['exports']))
+
+                historical_manifest = client.get('/api/runs/sealed-record/exports/manifest-json')
+                self.assertEqual(historical_manifest.status_code, 200)
+                historical_manifest.close()
+
+    def test_web_ui_temporal_mode_requires_explicit_baseline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(Path(tmpdir))
+            with app.test_client() as client:
+                response = client.post('/api/crawl', json={
+                    'target_specimen': 'https://example.com',
+                    'target_url': 'https://example.com',
+                    'mode': 'temporal',
+                })
+                self.assertEqual(response.status_code, 400)
+                payload = response.get_json()
+                self.assertIn('Temporal mode requires an explicit baseline path.', payload['error'])
 
     def test_web_ui_setup_check_route_surfaces_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
