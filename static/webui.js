@@ -81,6 +81,7 @@ const MODE_CONFIG = {
 const DEFAULT_SPECIMEN = 'https://example.com';
 const DRY_RUN_ON_MESSAGE = 'Dry run is enabled: the crawl button validates the rite and exits before visiting the target.';
 const DRY_RUN_OFF_MESSAGE = 'Dry run is disabled: the crawl button will visit the target.';
+const MOBILE_BREAKPOINT = 980;
 let panelResizeTimer = null;
 
 const els = {
@@ -493,9 +494,11 @@ function sortedResultRows(rows) {
     const a = left?.[sortKey];
     const b = right?.[sortKey];
     if (sortKey === 'status_code' || sortKey === 'depth' || sortKey === 'discovery_time') {
-      return (((Number(a || 0) - Number(b || 0)) || String(left.url || '').localeCompare(String(right.url || ''))) * direction);
+      const comparison = (Number(a || 0) - Number(b || 0)) || String(left.url || '').localeCompare(String(right.url || ''));
+      return comparison * direction;
     }
-    return ((String(a || '').localeCompare(String(b || '')) || String(left.url || '').localeCompare(String(right.url || ''))) * direction);
+    const comparison = String(a || '').localeCompare(String(b || '')) || String(left.url || '').localeCompare(String(right.url || ''));
+    return comparison * direction;
   });
 }
 
@@ -787,8 +790,20 @@ function initializeCollapsiblePanels() {
     });
     header.appendChild(button);
     panel.appendChild(body);
-    setExpanded(window.innerWidth > 980 ? true : !collapsedDefault);
+    setExpanded(window.innerWidth > MOBILE_BREAKPOINT ? true : !collapsedDefault);
     panel.dataset.collapsibleBound = 'true';
+  });
+}
+
+function syncCollapsiblePanelsToViewport() {
+  document.querySelectorAll('[data-collapsible="mobile"]').forEach((panel) => {
+    const body = panel.querySelector('.panel-collapse-body');
+    const button = panel.querySelector('.panel-toggle');
+    if (!body || !button) return;
+    const expanded = window.innerWidth > MOBILE_BREAKPOINT ? true : panel.dataset.collapsedDefault !== 'true';
+    body.classList.toggle('is-collapsed', !expanded);
+    button.textContent = expanded ? 'COLLAPSE' : 'EXPAND';
+    button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   });
 }
 
@@ -815,9 +830,6 @@ function applyResultFilter() {
 
 ['input', 'change'].forEach((eventName) => {
   els.form.addEventListener(eventName, renderCommandPreview);
-});
-els.form.addEventListener('submit', (event) => {
-  event.preventDefault();
 });
 els.crawlMode.addEventListener('change', syncModeControls);
 els.resultSearch.addEventListener('input', () => {
@@ -854,20 +866,13 @@ els.rerunSetupCheckButton.addEventListener('click', refreshSetupDiagnostics);
 bindFlagAnnouncements();
 syncModeControls();
 initializeCollapsiblePanels();
+syncCollapsiblePanelsToViewport();
 refreshState();
 refreshSetupDiagnostics();
 state.timer = setInterval(refreshState, 1500);
 window.addEventListener('resize', () => {
   clearTimeout(panelResizeTimer);
   panelResizeTimer = setTimeout(() => {
-  document.querySelectorAll('[data-collapsible="mobile"]').forEach((panel) => {
-    const body = panel.querySelector('.panel-collapse-body');
-    const button = panel.querySelector('.panel-toggle');
-    if (!body || !button) return;
-    const shouldExpand = window.innerWidth > 980;
-    body.classList.toggle('is-collapsed', !shouldExpand && panel.dataset.collapsedDefault === 'true');
-    button.textContent = body.classList.contains('is-collapsed') ? 'EXPAND' : 'COLLAPSE';
-    button.setAttribute('aria-expanded', body.classList.contains('is-collapsed') ? 'false' : 'true');
-  });
+    syncCollapsiblePanelsToViewport();
   }, 120);
 });

@@ -165,7 +165,24 @@ def materialize_timeline_json(output_dir: Path) -> Path | None:
     if not jsonl_path.exists():
         return None
     json_path = output_dir / TIMELINE_JSON_NAME
-    json_path.write_text(json.dumps(read_json_lines(jsonl_path), indent=2, ensure_ascii=False), encoding='utf-8')
+    with jsonl_path.open('r', encoding='utf-8') as source, json_path.open('w', encoding='utf-8') as target:
+        target.write('[\n')
+        first = True
+        for raw_line in source:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if not first:
+                target.write(',\n')
+            target.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            first = False
+        target.write('\n]\n')
     return json_path
 
 
