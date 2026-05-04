@@ -52,6 +52,7 @@ python webapp.py
 ```
 
 Then open `http://127.0.0.1:8080` for the gothic DOS crawler console. The web UI wraps the existing crawler CLI, streams live crawl output, preserves exports, and writes each run under `webui_runs/`.
+It also exposes a first-run diagnostics panel so dependency, browser, output-path, proxy, and render smoke issues are visible before a crawl goes sideways.
 
 ### Launcher scripts
 
@@ -226,6 +227,7 @@ python -m playwright install chromium
 ## Checkpoint / resume
 
 Use `--checkpoint crawl.json` to persist crawler state after seeding, each crawl depth, script scanning, and final completion. Restart the same hunt later with `--resume crawl.json`.
+Use `--setup-check` before a first run to verify dependencies, browser rendering, proxy reachability, and write access to the chosen output directory.
 
 ## Output structure
 
@@ -248,6 +250,7 @@ example.com/
 ├── results.json
 ├── autopsy.json
 ├── autopsy.md
+├── crawl-manifest.json
 ├── robots.txt
 ├── scripts.txt
 ├── skipped.txt

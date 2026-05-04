@@ -41,6 +41,7 @@ from core.autopsy import (
     ANALYSIS_DATASET_NAMES,
     anatomy_lines,
     build_autopsy,
+    build_crawl_manifest,
     build_mutation_probes,
     build_site_anatomy,
     finalize_genealogy,
@@ -49,6 +50,7 @@ from core.autopsy import (
     record_artifact_discovery,
     update_artifact_observation,
     write_autopsy_files,
+    write_manifest_file,
 )
 from core.config import INTELS
 from core.extractors import run_page_extractors, run_script_extractors
@@ -174,14 +176,25 @@ parser.add_argument('-v', '--verbose', help='Show every drop of blood (verbose o
 args = parser.parse_args()
 
 if args.setup_check:
-    status = setup_status()
+    status = setup_status(output_dir=args.output, proxy=args.proxies)
     print(f'{fang}First-run setup check')
     print(f'{crypt}Install Python deps: {status["install_hint"]}')
     print(f'{crypt}Install browser:    {status["browser_hint"]}')
     for module_name, module_status in sorted(status['packages'].items()):
         print(f'{fang}{module_name:<12} {module_status}')
     print(f'{fang}playwright-browser {status["playwright_browser"]}')
-    sys.exit(0 if all(value == 'ok' for value in status['packages'].values()) and status['playwright_browser'] == 'ok' else 1)
+    print(f'{fang}render-smoke     {status["render_smoke"]}')
+    print(f'{fang}output-dir       {status["output_dir"]["status"]} ({status["output_dir"]["path"]})')
+    print(f'{fang}proxy-sanity     {status["proxy"]["status"]} ({status["proxy"]["detail"]})')
+    sys.exit(
+        0 if (
+            all(value == 'ok' for value in status['packages'].values())
+            and status['playwright_browser'] == 'ok'
+            and status['render_smoke'] == 'ok'
+            and status['output_dir']['status'] == 'ok'
+            and status['proxy']['status'] != 'missing'
+        ) else 1
+    )
 
 resume_state = None
 if args.resume:
@@ -773,6 +786,31 @@ def write_checkpoint(stage):
         save_checkpoint(checkpoint_path, checkpoint_payload(stage))
 
 
+def ordered_url_values(values, *, state=None):
+    ordered = []
+    seen = set()
+    for url, record in sorted(crawl_records.items(), key=lambda item: int((item[1] or {}).get('discovery_time') or 0)):
+        if url not in values:
+            continue
+        if state and str(record.get('state') or '') != state:
+            continue
+        ordered.append(url)
+        seen.add(url)
+    for item in values:
+        if item not in seen:
+            ordered.append(item)
+            seen.add(item)
+    return ordered
+
+
+def ordered_redirect_values(values):
+    def sort_key(item):
+        source = str(item).split(' => ', 1)[0]
+        record = crawl_records.get(source) or {}
+        return int(record.get('discovery_time') or 0), source
+    return sorted(values, key=sort_key)
+
+
 def record_request_outcome(url, result, purpose):
     note_content_type(result.content_type)
     upsert_crawl_record(
@@ -1320,9 +1358,10 @@ if mode == 'temporal':
         previous_snapshot = load_previous_snapshot(output_dir)
 artifact_genealogy_placeholder = set()
 datasets = [
-    files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
-    document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
-    site_anatomy, mutation_probes, artifact_genealogy_placeholder,
+    list(files), list(forms), list(intel), list(robots), list(custom), ordered_url_values(failed, state='failed'), list(skipped), ordered_redirect_values(redirects), ordered_url_values(internal),
+    ordered_url_values(scripts), ordered_url_values(external), list(fuzzable), list(endpoints), list(keys),
+    list(document_metadata), list(document_leaks), list(js_intel), list(threads), list(locations), list(stories), list(hidden_paths), list(scam_signals), list(temporal_diffs),
+    list(site_anatomy), list(mutation_probes), list(artifact_genealogy_placeholder),
 ]
 if mode == 'temporal' and previous_snapshot:
     current_snapshot = {
@@ -1340,12 +1379,12 @@ datasets_dict = {
     'intel': sorted(intel),
     'robots': sorted(robots),
     'custom': sorted(custom),
-    'failed': sorted(failed),
+    'failed': ordered_url_values(failed, state='failed'),
     'skipped': sorted(skipped),
-    'redirects': sorted(redirects),
-    'internal': sorted(internal),
-    'scripts': sorted(scripts),
-    'external': sorted(external),
+    'redirects': ordered_redirect_values(redirects),
+    'internal': ordered_url_values(internal),
+    'scripts': ordered_url_values(scripts),
+    'external': ordered_url_values(external),
     'fuzzable': sorted(fuzzable),
     'endpoints': sorted(endpoints),
     'keys': sorted(keys),
@@ -1366,9 +1405,10 @@ mutation_probes.update(mutation_lines(mutation_probe_records))
 artifact_genealogy_lines = set(genealogy_lines(artifact_genealogy))
 
 datasets = [
-    files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
-    document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
-    site_anatomy, mutation_probes, artifact_genealogy_lines,
+    datasets_dict['files'], datasets_dict['forms'], datasets_dict['intel'], datasets_dict['robots'], datasets_dict['custom'], datasets_dict['failed'], datasets_dict['skipped'],
+    datasets_dict['redirects'], datasets_dict['internal'], datasets_dict['scripts'], datasets_dict['external'], datasets_dict['fuzzable'], datasets_dict['endpoints'],
+    datasets_dict['keys'], datasets_dict['document_metadata'], datasets_dict['document_leaks'], datasets_dict['js_intel'], datasets_dict['threads'], datasets_dict['locations'],
+    datasets_dict['stories'], datasets_dict['hidden_paths'], datasets_dict['scam_signals'], datasets_dict['temporal_diffs'], sorted(site_anatomy), sorted(mutation_probes), sorted(artifact_genealogy_lines),
 ]
 writer(datasets, dataset_names, output_dir)
 
@@ -1445,6 +1485,30 @@ autopsy = build_autopsy(
 autopsy_json_path, autopsy_md_path = write_autopsy_files(output_dir, autopsy)
 print(f'{fang}Autopsy JSON    {autopsy_json_path}')
 print(f'{fang}Autopsy MD      {autopsy_md_path}')
+manifest = build_crawl_manifest(
+    specimen=specimen_profile,
+    ritual=ritual_plan,
+    preset=preset,
+    mode=mode,
+    command=[sys.executable, os.path.abspath(__file__), *sys.argv[1:]],
+    output_dir=output_dir,
+    main_url=main_url,
+    resolved_config={
+        **resolved_config,
+        'ritual_chain': ritual_chain,
+        'host': host,
+        'domain': domain,
+        'scope_allow': [pattern.pattern for pattern in scope_allow],
+        'scope_deny': [pattern.pattern for pattern in scope_deny],
+        'resume': args.resume or '',
+        'checkpoint': checkpoint_path or '',
+    },
+    checkpoint_path=checkpoint_path,
+    resumed_from=args.resume,
+    temporal_baseline=temporal_baseline,
+)
+manifest_path = write_manifest_file(output_dir, manifest)
+print(f'{fang}Manifest        {manifest_path}')
 
 write_checkpoint('complete')
 print(f'\n{blood}The harvest is complete. Loot interred in {bold}{green}{output_dir}{end}')

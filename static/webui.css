@@ -503,6 +503,7 @@ body::after {
 
 .result-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
   margin-top: 0.75rem;
@@ -527,6 +528,35 @@ body::after {
 .result-error {
   margin-top: 0.55rem;
   color: var(--accent-amber);
+}
+
+.result-trace {
+  margin-top: 0.75rem;
+  border-top: 1px dotted rgba(133, 255, 152, 0.12);
+  padding-top: 0.65rem;
+}
+
+.result-trace summary {
+  cursor: pointer;
+  color: var(--accent-amber);
+}
+
+.result-trace-grid {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+  color: var(--text-bone);
+}
+
+.result-link,
+.result-link:visited {
+  color: var(--text-phosphor);
+}
+
+.result-link-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .result-item {

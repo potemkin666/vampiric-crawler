@@ -3,6 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$SCRIPT_DIR/webapp.py"
+CLI_APP="$SCRIPT_DIR/vampire.py"
 
 if command -v python3 &>/dev/null; then
     PYTHON=python3
@@ -21,6 +22,10 @@ fi
 if [ ! -f "$APP" ]; then
     echo "[☠] Missing web console entrypoint: $APP" >&2
     exit 1
+fi
+
+if [ -f "$CLI_APP" ] && ! $PYTHON "$CLI_APP" --setup-check -o "$SCRIPT_DIR"; then
+    echo "[!] First-run diagnostics found issues. Review the output above before opening the console." >&2
 fi
 
 cd "$SCRIPT_DIR"

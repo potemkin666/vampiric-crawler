@@ -3,6 +3,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "APP=%SCRIPT_DIR%webapp.py"
+set "CLI_APP=%SCRIPT_DIR%vampire.py"
 
 where python3 >nul 2>&1
 if %errorlevel%==0 (
@@ -29,6 +30,13 @@ if exist "%SCRIPT_DIR%requirements.txt" (
 if not exist "%APP%" (
     echo [☠] Missing web console entrypoint: "%APP%"
     exit /b 1
+)
+
+if exist "%CLI_APP%" (
+    %PYTHON% "%CLI_APP%" --setup-check -o "%SCRIPT_DIR%"
+    if errorlevel 1 (
+        echo [!] First-run diagnostics found issues. Review the output above before opening the console.
+    )
 )
 
 cd /d "%SCRIPT_DIR%"

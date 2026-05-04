@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import tempfile
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from core.modes import (
@@ -150,7 +151,7 @@ def resolve_main_target(specimen: dict[str, object]) -> str:
     return str(roots[0]) if roots else ''
 
 
-def setup_status() -> dict[str, object]:
+def setup_status(output_dir: str | None = None, proxy: object | None = None) -> dict[str, object]:
     """Return friendly first-run dependency status."""
     packages = {}
     for module_name in ('requests', 'urllib3', 'tldextract', 'flask', 'playwright'):
@@ -160,20 +161,59 @@ def setup_status() -> dict[str, object]:
         except Exception as exc:
             packages[module_name] = f'missing: {exc}'
     browser = 'unknown'
+    render_smoke = 'unknown'
     try:
         from playwright.sync_api import sync_playwright
         manager = sync_playwright().start()
         try:
             browser_instance = manager.chromium.launch(headless=True)
-            browser_instance.close()
             browser = 'ok'
+            context = browser_instance.new_context(ignore_https_errors=True)
+            try:
+                page = context.new_page()
+                page.set_content('<html><body><a href="/ritual">ritual</a></body></html>')
+                page.content()
+                render_smoke = 'ok'
+            finally:
+                context.close()
+                browser_instance.close()
         finally:
             manager.stop()
     except Exception as exc:
         browser = f'missing: {exc}'
+        render_smoke = f'missing: {exc}'
+    output_path = Path(output_dir).expanduser() if output_dir else Path.cwd()
+    output_dir_status = 'ok'
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=output_path, prefix='.vampiric-check-', delete=True):
+            pass
+    except Exception as exc:
+        output_dir_status = f'missing: {exc}'
+    proxy_status = {'status': 'not-configured', 'detail': 'No proxy configured for setup check.'}
+    proxy_candidate = ''
+    if isinstance(proxy, list):
+        proxy_candidate = next((item.get('http') for item in proxy if isinstance(item, dict) and item.get('http')), '')
+    elif isinstance(proxy, dict):
+        proxy_candidate = str(proxy.get('http') or proxy.get('https') or '')
+    elif proxy:
+        proxy_candidate = str(proxy)
+    if proxy_candidate:
+        try:
+            from core.utils import is_good_proxy
+            normalized_proxy = proxy_candidate.replace('http://', '').replace('https://', '')
+            if is_good_proxy({'http': f'http://{normalized_proxy}', 'https': f'http://{normalized_proxy}'}):
+                proxy_status = {'status': 'ok', 'detail': normalized_proxy}
+            else:
+                proxy_status = {'status': 'missing', 'detail': f'Proxy unreachable: {normalized_proxy}'}
+        except Exception as exc:
+            proxy_status = {'status': 'missing', 'detail': f'Proxy check failed: {exc}'}
     return {
         'packages': packages,
         'playwright_browser': browser,
+        'render_smoke': render_smoke,
+        'output_dir': {'path': str(output_path), 'status': output_dir_status},
+        'proxy': proxy_status,
         'install_hint': 'python -m pip install -r requirements.txt',
         'browser_hint': 'python -m playwright install chromium',
     }

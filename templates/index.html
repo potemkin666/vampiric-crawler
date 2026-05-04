@@ -153,13 +153,22 @@
           <div class="summary-chips" id="summaryChips"></div>
         </section>
 
-        <section class="terminal-panel export-panel">
+        <section class="terminal-panel export-panel" id="exportPanel">
           <div class="panel-title">SEALED RECORD EXTRACTION</div>
           <div class="export-buttons" id="exportButtons">
             <span class="empty-note">THE ARCHIVE IS SILENT</span>
           </div>
           <div class="record-path" id="recordPath"></div>
         </section>
+      </section>
+
+      <section class="terminal-panel">
+        <div class="panel-title">FIRST-RUN DIAGNOSTICS</div>
+        <div class="state-banner" id="setupCheckStatus">RUNNING FIRST-RUN DIAGNOSTICS…</div>
+        <div class="command-buttons">
+          <button type="button" id="rerunSetupCheckButton" class="terminal-button">&gt; RERUN FIRST-RUN CHECK</button>
+        </div>
+        <pre class="terminal-log selectable compact-log" id="setupCheckDetail">Awaiting first-run diagnostics…</pre>
       </section>
 
       <section class="terminal-grid status-grid">
@@ -214,6 +223,22 @@
             <option value="content_type">CONTENT TYPE</option>
             <option value="depth">DEPTH</option>
             <option value="source_page">SOURCE PAGE</option>
+          </select>
+          <label for="resultStateFilter">STATE</label>
+          <select id="resultStateFilter">
+            <option value="">ALL STATES</option>
+          </select>
+          <label for="resultErrorFilter">ERROR</label>
+          <select id="resultErrorFilter">
+            <option value="">ALL ERRORS</option>
+          </select>
+          <label for="resultTypeFilter">CONTENT TYPE</label>
+          <select id="resultTypeFilter">
+            <option value="">ALL TYPES</option>
+          </select>
+          <label for="resultSourceFilter">SOURCE KIND</label>
+          <select id="resultSourceFilter">
+            <option value="">ALL SOURCES</option>
           </select>
         </div>
         <div class="result-ledger" id="resultLedger"></div>

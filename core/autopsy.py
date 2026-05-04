@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import re
+import sys
 from urllib.parse import urlsplit
 
 ANALYSIS_DATASET_NAMES = (
@@ -169,15 +172,20 @@ def build_site_anatomy(
     static_assets = _unique([url for url in files if _path_matches(url, STATIC_EXTS)] + scripts)
     admin_ish = _unique([url for url in internals + failed if ADMIN_RE.search(url)])
     old_paths = _unique([url for url in internals + failed + files if OLD_RE.search(url)])
-    third_party = _unique([
+    analytics = _unique([url for url in externals if ANALYTICS_RE.search(url)])
+    cdn_assets = _unique([url for url in externals if CDN_RE.search(url)])
+    external_trust = _unique([url for url in externals if TRUST_RE.search(url)])
+    external_refs = _unique([
         url for url in externals
-        if ANALYTICS_RE.search(url) or CDN_RE.search(url) or _external_host(url, main_url)
+        if _external_host(url, main_url)
+        and url not in analytics
+        and url not in cdn_assets
+        and url not in external_trust
     ])
     archive_only = _unique([
         url for url, record in finalize_genealogy(genealogy).items()
         if record['archive_presence'] and url not in internals and url not in files
     ])
-    external_trust = _unique([url for url in externals if TRUST_RE.search(url)])
     dead_ends = _unique(failed + datasets.get('skipped', []))
 
     anatomy = {
@@ -188,9 +196,11 @@ def build_site_anatomy(
         'static_assets': static_assets,
         'admin_ish_routes': admin_ish,
         'old_paths': old_paths,
-        'third_party_dependencies': third_party,
+        'analytics': analytics,
+        'cdn_assets': cdn_assets,
+        'external_refs': external_refs,
         'archive_only_paths': archive_only,
-        'external_trust_links': external_trust,
+        'trust_links': external_trust,
         'dead_ends': dead_ends,
     }
     if specimen.get('archive_hint'):
@@ -279,7 +289,7 @@ def build_autopsy(
     }
     what_broke = datasets.get('failed', []) + datasets.get('skipped', [])
     what_changed = datasets.get('temporal_diffs', [])
-    what_looks_fake = datasets.get('scam_signals', []) + anatomy.get('external_trust_links', [])
+    what_looks_fake = datasets.get('scam_signals', []) + anatomy.get('trust_links', [])
     worth_probing_next = [item['probe'] for item in mutation_probes[:12]]
     return {
         'what_the_target_is': {
@@ -372,6 +382,61 @@ def write_autopsy_files(output_dir: str, autopsy: dict[str, object]) -> tuple[st
     return json_path, md_path
 
 
+def build_crawl_manifest(
+    *,
+    specimen: dict[str, object],
+    ritual: dict[str, object],
+    preset: str,
+    mode: str,
+    command: list[str],
+    output_dir: str,
+    main_url: str,
+    resolved_config: dict[str, object],
+    checkpoint_path: str | None = None,
+    resumed_from: str | None = None,
+    temporal_baseline: str | None = None,
+    stage: str = 'complete',
+) -> dict[str, object]:
+    """Return a canonical crawl manifest for a run."""
+    return {
+        'manifest_version': 1,
+        'stage': stage,
+        'generated_at': _now_iso(),
+        'target': {
+            'main_url': main_url,
+            'specimen': specimen,
+            'ritual_chain': ritual.get('ritual_chain'),
+            'ritual_label': ritual.get('label'),
+            'preset': preset,
+            'mode': mode,
+        },
+        'resolved_config': resolved_config,
+        'runtime': {
+            'python_version': sys.version,
+            'python_executable': sys.executable,
+            'platform': platform.platform(),
+            'cwd': os.getcwd(),
+            'dependency_versions': _dependency_versions(('requests', 'urllib3', 'tldextract', 'flask', 'playwright')),
+        },
+        'command': list(command or ()),
+        'lineage': {
+            'checkpoint_path': checkpoint_path or '',
+            'resumed_from': resumed_from or '',
+            'temporal_baseline': temporal_baseline or '',
+            'output_dir': output_dir,
+        },
+        'artifacts': _hash_output_dir(output_dir),
+    }
+
+
+def write_manifest_file(output_dir: str, manifest: dict[str, object]) -> str:
+    """Write crawl manifest JSON to *output_dir*."""
+    path = os.path.join(output_dir, 'crawl-manifest.json')
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(manifest, handle, indent=2, ensure_ascii=False)
+    return path
+
+
 def _append_probe(probes: list[dict[str, str]], seen: set[str], probe: str, source: str, reason: str) -> None:
     if probe in seen:
         return
@@ -414,3 +479,43 @@ def _unique(items: list[str]) -> list[str]:
         seen.add(item)
         ordered.append(item)
     return ordered
+
+
+def _dependency_versions(names: tuple[str, ...]) -> dict[str, str]:
+    versions = {}
+    for name in names:
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = 'missing'
+    return versions
+
+
+def _hash_output_dir(output_dir: str) -> dict[str, dict[str, object]]:
+    artifacts: dict[str, dict[str, object]] = {}
+    if not output_dir or not os.path.isdir(output_dir):
+        return artifacts
+    for entry in sorted(os.listdir(output_dir)):
+        if entry == 'crawl-manifest.json':
+            continue
+        path = os.path.join(output_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        artifacts[entry] = {
+            'sha256': _hash_file(path),
+            'size': os.path.getsize(path),
+        }
+    return artifacts
+
+
+def _hash_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(65536), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()

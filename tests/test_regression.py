@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from core import render, zap
 from core.checkpoint import load_checkpoint, normalize_checkpoint_sets, save_checkpoint
+from core.autopsy import build_site_anatomy
 from core.modes import (
     build_hidden_candidates,
     build_temporal_diffs,
@@ -34,6 +35,7 @@ from core.utils import (
     normalize_fuzzable_url,
     normalize_url,
     top_level,
+    writer,
 )
 from plugins.exporter import exporter
 from webapp import CrawlRun, build_crawl_command, create_app
@@ -350,6 +352,39 @@ class RegressionTests(unittest.TestCase):
             self.assertIn('internal,https://example.com', content)
             self.assertIn('stats,visited=1', content)
 
+    def test_writer_preserves_list_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer([['second', 'first', 'third']], ['ordered'], tmpdir)
+            with open(os.path.join(tmpdir, 'ordered.txt'), 'r', encoding='utf-8') as handle:
+                lines = handle.read().splitlines()
+            self.assertEqual(lines, ['second', 'first', 'third'])
+
+    def test_site_anatomy_splits_third_party_buckets(self):
+        anatomy = build_site_anatomy(
+            'https://example.com',
+            {
+                'internal': ['https://example.com/login'],
+                'external': [
+                    'https://www.googletagmanager.com/gtm.js',
+                    'https://cdn.example.net/app.js',
+                    'https://docs.partner.example.org/readme',
+                    'https://github.com/example/project',
+                ],
+                'files': [],
+                'endpoints': [],
+                'forms': [],
+                'failed': [],
+                'scripts': [],
+                'skipped': [],
+            },
+            {},
+            {},
+        )
+        self.assertIn('https://www.googletagmanager.com/gtm.js', anatomy['analytics'])
+        self.assertIn('https://cdn.example.net/app.js', anatomy['cdn_assets'])
+        self.assertIn('https://docs.partner.example.org/readme', anatomy['external_refs'])
+        self.assertIn('https://github.com/example/project', anatomy['trust_links'])
+
     def test_fixture_handler_send_accepts_binary_payloads(self):
         server = ThreadedHTTPServer(('127.0.0.1', 0), FixtureHandler)
         server.base_url = 'http://127.0.0.1:{}'.format(server.server_port)
@@ -576,6 +611,41 @@ class RegressionTests(unittest.TestCase):
                 recorded_args = handle.read().splitlines()
             self.assertEqual(recorded_args, [app_path, '-u', 'https://example.com'])
 
+    def test_launch_script_runs_setup_check_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            launcher_path = self._write_test_launcher(tmpdir)
+            app_path = self._write_entrypoint_stub(tmpdir)
+            bin_dir = self._write_python_stub(
+                tmpdir,
+                '#!/usr/bin/env bash\n'
+                'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+                '  exit 0\n'
+                'fi\n'
+                'printf "%s\\n" "$@" >> "$TEST_LOG"\n',
+            )
+
+            env = os.environ.copy()
+            env['PATH'] = bin_dir + os.pathsep + env.get('PATH', '')
+            env['TEST_LOG'] = os.path.join(tmpdir, 'launch-args.txt')
+            env['VAMPIRIC_LAUNCH_PROMPT'] = '1'
+
+            result = subprocess.run(
+                [launcher_path],
+                cwd=tmpdir,
+                input='https://example.com\n',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            with open(env['TEST_LOG'], 'r', encoding='utf-8') as handle:
+                recorded_args = handle.read().splitlines()
+            self.assertEqual(recorded_args[:3], [app_path, '--setup-check', '-o'])
+            self.assertEqual(recorded_args[-3:], [app_path, '-u', 'https://example.com'])
+
     def test_launch_script_trims_prompt_input_before_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             launcher_path = self._write_test_launcher(tmpdir)
@@ -703,6 +773,13 @@ class RegressionTests(unittest.TestCase):
                     redirects = handle.read()
                 self.assertIn('/redirect', redirects)
                 self.assertIn('/landing', redirects)
+
+                with open(os.path.join(output_dir, 'crawl-manifest.json'), 'r', encoding='utf-8') as handle:
+                    manifest = json.load(handle)
+                self.assertEqual(manifest['target']['main_url'], server.base_url)
+                self.assertEqual(manifest['lineage']['checkpoint_path'], '')
+                self.assertIn('autopsy.json', manifest['artifacts'])
+                self.assertIn('results.json', manifest['artifacts'])
 
                 with open(os.path.join(output_dir, 'robots.txt'), 'r', encoding='utf-8') as handle:
                     robots = handle.read()
@@ -1031,6 +1108,7 @@ class RegressionTests(unittest.TestCase):
             (output_dir / 'files.txt').write_text('https://example.com/report.pdf\nhttps://example.com/app.js.map\n', encoding='utf-8')
             (output_dir / 'intel.txt').write_text('https://example.com:EMAIL:test@example.com\n', encoding='utf-8')
             (output_dir / 'failed.txt').write_text('https://example.com/admin\n', encoding='utf-8')
+            (output_dir / 'redirects.txt').write_text('https://example.com/ => https://example.com/ -> https://example.com/about\n', encoding='utf-8')
             (output_dir / 'stats.txt').write_text('visited=2\nfailures=1\nredirects=0\n', encoding='utf-8')
             checkpoint.write_text(json.dumps({
                 'version': 1,
@@ -1049,6 +1127,7 @@ class RegressionTests(unittest.TestCase):
                         'source_page': 'seed',
                         'discovery_time': 1,
                         'state': 'completed',
+                        'source_kind': 'seed',
                     },
                 },
                 'robots_metadata': {
@@ -1082,20 +1161,49 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(state_data['summary']['mail_sigils'], 1)
                 self.assertTrue(any(panel['key'] == 'documents' for panel in state_data['panels']))
                 self.assertTrue(any(item['kind'] == 'autopsy-md' for item in state_data['exports']))
+                self.assertTrue(any(item['kind'] == 'manifest-json' for item in state_data['exports']))
                 self.assertTrue(any(item['kind'] == 'bundle' for item in state_data['exports']))
                 self.assertEqual(state_data['queue']['pending']['count'], 1)
                 self.assertEqual(state_data['robots_details']['crawl_delay'], 1)
                 self.assertEqual(state_data['sitemap_details']['sitemap_urls'], ['https://example.com/sitemap.xml'])
                 self.assertEqual(state_data['result_rows'][0]['source_page'], 'seed')
+                self.assertEqual(state_data['result_rows'][0]['source_kind'], 'seed')
+                self.assertEqual(state_data['result_rows'][0]['related_panel_key'], 'links')
+                self.assertEqual(state_data['result_rows'][0]['redirect_chain'], ['https://example.com/', 'https://example.com/about'])
 
                 autopsy_response = client.get('/api/exports/autopsy-md')
                 self.assertEqual(autopsy_response.status_code, 200)
                 self.assertIn('Vampiric Crawler Autopsy', autopsy_response.get_data(as_text=True))
                 autopsy_response.close()
 
+                manifest_response = client.get('/api/exports/manifest-json')
+                self.assertEqual(manifest_response.status_code, 200)
+                manifest_payload = json.loads(manifest_response.get_data(as_text=True))
+                self.assertEqual(manifest_payload['target']['main_url'], 'https://example.com')
+                manifest_response.close()
+
                 bundle_response = client.get('/api/exports/bundle')
                 self.assertEqual(bundle_response.status_code, 200)
                 bundle_response.close()
+
+    def test_web_ui_setup_check_route_surfaces_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(Path(tmpdir))
+            with patch('webapp.setup_status', return_value={
+                'packages': {'flask': 'ok', 'playwright': 'missing: browser'},
+                'playwright_browser': 'missing: browser',
+                'render_smoke': 'missing: browser',
+                'output_dir': {'path': tmpdir, 'status': 'ok'},
+                'proxy': {'status': 'not-configured', 'detail': 'No proxy configured for setup check.'},
+                'install_hint': 'python -m pip install -r requirements.txt',
+                'browser_hint': 'python -m playwright install chromium',
+            }):
+                with app.test_client() as client:
+                    response = client.get('/api/setup-check')
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.get_json()
+                    self.assertEqual(payload['overall_status'], 'issues')
+                    self.assertTrue(any(item['name'] == 'render-smoke' for item in payload['checks']))
 
 
 if __name__ == '__main__':

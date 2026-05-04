@@ -23,10 +23,12 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from core.autopsy import (
     ANALYSIS_DATASET_NAMES,
     build_autopsy,
+    build_crawl_manifest,
     build_mutation_probes,
     build_site_anatomy,
     finalize_genealogy,
     render_autopsy_markdown,
+    write_manifest_file,
 )
 from core.modes import (
     MODE_DATASET_NAMES,
@@ -37,7 +39,7 @@ from core.modes import (
     coerce_preset,
     coerce_ritual_chain,
 )
-from core.specimen import apply_preset, classify_specimen, resolve_ritual_plan
+from core.specimen import apply_preset, classify_specimen, resolve_ritual_plan, setup_status
 from plugins.exporter import exporter
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -131,6 +133,16 @@ def read_stats(path: Path) -> dict[str, Any]:
             except ValueError:
                 stats[key] = value
     return stats
+
+
+def parse_redirects(items: list[str]) -> dict[str, list[str]]:
+    mapping: dict[str, list[str]] = {}
+    for item in items:
+        source, _, trail = item.partition(' => ')
+        if not source or not trail:
+            continue
+        mapping[source] = [part.strip() for part in trail.split(' -> ') if part.strip()]
+    return mapping
 
 
 def filter_documents(items: list[str]) -> list[str]:
@@ -441,7 +453,11 @@ class CrawlRun:
             'queue': queue_snapshot if any(details.get('count') for details in queue_snapshot.values()) else checkpoint_meta['queue'],
             'robots_details': robots_metadata if robots_metadata.get('rules') or robots_metadata.get('crawl_delay') is not None else checkpoint_meta['robots'],
             'sitemap_details': sitemap_metadata if sitemap_metadata.get('sitemap_urls') or sitemap_metadata.get('queued_urls') else checkpoint_meta['sitemap'],
-            'result_rows': build_result_rows(result_records or checkpoint_meta['results']),
+            'result_rows': build_result_rows(
+                result_records or checkpoint_meta['results'],
+                redirect_lines=datasets.get('redirects', []),
+                exports=build_exports(self.output_dir),
+            ),
             'summary': build_summary(self.payload, datasets, stats),
             'panels': build_panels(self.payload, datasets, stats),
             'exports': build_exports(self.output_dir),
@@ -520,10 +536,23 @@ def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
     return metadata
 
 
-def build_result_rows(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def build_result_rows(
+    records: dict[str, dict[str, Any]],
+    redirect_lines: list[str] | None = None,
+    exports: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    redirect_map = parse_redirects(redirect_lines or [])
+    export_kinds = [item['kind'] for item in (exports or [])]
     rows = []
     for url, raw in sorted(records.items(), key=lambda item: int((item[1] or {}).get('discovery_time') or 0)):
         raw = raw or {}
+        state = str(raw.get('state') or 'pending')
+        source_kind = str(raw.get('source_kind') or '')
+        related_panel_key, related_panel_title = related_panel_for_row(
+            state=state,
+            source_kind=source_kind,
+            content_type=str(raw.get('content_type') or ''),
+        )
         rows.append({
             'url': str(raw.get('url') or url),
             'status_code': raw.get('status_code'),
@@ -531,12 +560,29 @@ def build_result_rows(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]
             'depth': raw.get('depth'),
             'source_page': str(raw.get('source_page') or ''),
             'discovery_time': int(raw.get('discovery_time') or 0),
-            'state': str(raw.get('state') or 'pending'),
+            'state': state,
             'error_kind': str(raw.get('error_kind') or ''),
             'error_message': str(raw.get('error_message') or ''),
-            'source_kind': str(raw.get('source_kind') or ''),
+            'source_kind': source_kind,
+            'redirect_chain': redirect_map.get(str(raw.get('url') or url), []),
+            'discovery_path': [item for item in (str(raw.get('source_page') or ''), str(raw.get('url') or url)) if item],
+            'related_panel_key': related_panel_key,
+            'related_panel_title': related_panel_title,
+            'export_kinds': export_kinds,
         })
     return rows
+
+
+def related_panel_for_row(*, state: str, source_kind: str, content_type: str) -> tuple[str, str]:
+    lowered_kind = source_kind.lower()
+    lowered_type = content_type.lower()
+    if state in {'failed', 'skipped'}:
+        return 'broken', 'BROKEN GATES'
+    if 'script' in lowered_kind or 'javascript' in lowered_type:
+        return 'scripts', 'SCRIPT BONES'
+    if 'document' in lowered_kind or any(token in lowered_type for token in ('pdf', 'msword', 'officedocument')):
+        return 'documents', 'DOCUMENT TOMBS'
+    return 'links', 'CRYPT PATHS'
 
 
 def build_summary(payload: dict[str, Any], datasets: dict[str, list[str]], stats: dict[str, Any]) -> dict[str, Any]:
@@ -659,6 +705,7 @@ def build_exports(output_dir: Path) -> list[dict[str, str]]:
         ('csv', 'EXPORT CSV', output_dir / 'results.csv'),
         ('autopsy-json', 'AUTOPSY JSON', output_dir / 'autopsy.json'),
         ('autopsy-md', 'AUTOPSY MD', output_dir / 'autopsy.md'),
+        ('manifest-json', 'CRAWL MANIFEST', output_dir / 'crawl-manifest.json'),
         ('bundle', 'EXPORT BUNDLE', output_dir / 'sealed-bundle.zip'),
     )
     return [
@@ -702,6 +749,22 @@ def ensure_exports(run: CrawlRun) -> None:
     autopsy_md_path = run.output_dir / 'autopsy.md'
     autopsy_json_path.write_text(json.dumps(autopsy, indent=2, ensure_ascii=False), encoding='utf-8')
     autopsy_md_path.write_text(render_autopsy_markdown(autopsy), encoding='utf-8')
+    manifest = build_crawl_manifest(
+        specimen=run.payload.get('specimen', {}),
+        ritual={
+            'ritual_chain': coerce_ritual_chain(run.payload.get('ritual_chain')),
+            'label': run.payload.get('ritual_label', ''),
+        },
+        preset=coerce_preset(run.payload.get('preset')),
+        mode=coerce_mode(run.payload.get('mode')),
+        command=run.command,
+        output_dir=str(run.output_dir),
+        main_url=run.payload.get('target_url', ''),
+        resolved_config=run.payload,
+        checkpoint_path=str(run.checkpoint_path),
+        temporal_baseline=str(run.payload.get('temporal_baseline') or ''),
+    )
+    write_manifest_file(str(run.output_dir), manifest)
     bundle_path = run.output_dir / 'sealed-bundle.zip'
     with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for child in sorted(run.output_dir.iterdir()):
@@ -715,6 +778,27 @@ def ensure_exports(run: CrawlRun) -> None:
         }, indent=2, ensure_ascii=False))
         archive.writestr('crawl-log.txt', '\n'.join(list(run.logs)))
     run.exports_ready = True
+
+
+def build_setup_diagnostics(output_dir: Path, proxy: str | None = None) -> dict[str, Any]:
+    status = setup_status(output_dir=str(output_dir), proxy=proxy)
+    checks = [
+        {'name': f'package:{name}', 'status': value, 'detail': value}
+        for name, value in sorted(status['packages'].items())
+    ]
+    checks.extend([
+        {'name': 'playwright-browser', 'status': status['playwright_browser'], 'detail': status['playwright_browser']},
+        {'name': 'render-smoke', 'status': status['render_smoke'], 'detail': status['render_smoke']},
+        {'name': 'output-dir', 'status': status['output_dir']['status'], 'detail': status['output_dir']['path']},
+        {'name': 'proxy-sanity', 'status': status['proxy']['status'], 'detail': status['proxy']['detail']},
+    ])
+    issues = [item for item in checks if str(item['status']) not in {'ok', 'not-configured'}]
+    return {
+        **status,
+        'checks': checks,
+        'overall_status': 'ok' if not issues else 'issues',
+        'status_message': 'FIRST-RUN DIAGNOSTICS CLEAR' if not issues else 'FIRST-RUN DIAGNOSTICS FOUND ISSUES',
+    }
 
 
 class CrawlManager:
@@ -891,6 +975,7 @@ class CrawlManager:
             'csv': run.output_dir / 'results.csv',
             'autopsy-json': run.output_dir / 'autopsy.json',
             'autopsy-md': run.output_dir / 'autopsy.md',
+            'manifest-json': run.output_dir / 'crawl-manifest.json',
             'bundle': run.output_dir / 'sealed-bundle.zip',
         }
         path = mapping.get(kind)
@@ -940,6 +1025,14 @@ def create_app(runs_root: Path | None = None) -> Flask:
             'resolved': resolved,
             'preset_description': PRESET_DEFINITIONS[coerce_preset(resolved.get('preset'))]['description'],
         })
+
+    @app.route('/api/setup-check', methods=['GET', 'POST'])
+    def setup_check() -> Any:
+        payload = request.get_json(silent=True) or {}
+        proxy = payload.get('proxy') if request.method == 'POST' else request.args.get('proxy')
+        output_dir = payload.get('output_dir') if request.method == 'POST' else request.args.get('output_dir')
+        diagnostics = build_setup_diagnostics(Path(output_dir) if output_dir else RUNS_ROOT, proxy=proxy)
+        return jsonify(diagnostics)
 
     @app.post('/api/crawl')
     def start_crawl() -> Any:

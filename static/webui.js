@@ -3,6 +3,7 @@ const state = {
   timer: null,
   lastFeedKey: '',
   sortKey: 'discovery_time',
+  lastState: null,
 };
 
 const PRESET_CONFIG = {
@@ -97,6 +98,9 @@ const els = {
   statusMessage: document.getElementById('statusMessage'),
   asciiMeter: document.getElementById('asciiMeter'),
   summaryChips: document.getElementById('summaryChips'),
+  setupCheckStatus: document.getElementById('setupCheckStatus'),
+  setupCheckDetail: document.getElementById('setupCheckDetail'),
+  rerunSetupCheckButton: document.getElementById('rerunSetupCheckButton'),
   liveFeed: document.getElementById('liveFeed'),
   errorConsole: document.getElementById('errorConsole'),
   resultPanels: document.getElementById('resultPanels'),
@@ -112,6 +116,10 @@ const els = {
   robotsPanel: document.getElementById('robotsPanel'),
   sitemapPanel: document.getElementById('sitemapPanel'),
   resultSort: document.getElementById('resultSort'),
+  resultStateFilter: document.getElementById('resultStateFilter'),
+  resultErrorFilter: document.getElementById('resultErrorFilter'),
+  resultTypeFilter: document.getElementById('resultTypeFilter'),
+  resultSourceFilter: document.getElementById('resultSourceFilter'),
   resultLedger: document.getElementById('resultLedger'),
 };
 
@@ -217,10 +225,22 @@ function renderSummary(data) {
   `).join('');
 }
 
+function renderSetupDiagnostics(data) {
+  const checks = data.checks || [];
+  els.setupCheckStatus.textContent = data.status_message || 'FIRST-RUN DIAGNOSTICS FOUND ISSUES';
+  els.setupCheckDetail.textContent = [
+    `Overall: ${data.overall_status || 'issues'}`,
+    `Output dir: ${data.output_dir?.status || '-'} // ${data.output_dir?.path || '-'}`,
+    `Proxy: ${data.proxy?.status || '-'} // ${data.proxy?.detail || '-'}`,
+    '',
+    ...checks.map((item) => `${item.name} => ${item.status}${item.detail ? ` // ${item.detail}` : ''}`),
+  ].join('\n');
+}
+
 function renderPanels(data) {
   const panels = data.panels || [];
   els.resultPanels.innerHTML = panels.map((panel) => `
-    <section class="terminal-panel">
+    <section class="terminal-panel" id="panel-${escapeHtml(panel.key || 'panel')}">
       <div class="panel-title">${escapeHtml(panel.title)} // ${escapeHtml(panel.count)}</div>
       <div class="result-list">
         ${(panel.items && panel.items.length)
@@ -330,8 +350,40 @@ function sortedResultRows(rows) {
   });
 }
 
+function populateLedgerFilterOptions(rows) {
+  const filters = [
+    { node: els.resultStateFilter, values: rows.map((row) => row.state).filter(Boolean), fallback: 'ALL STATES' },
+    { node: els.resultErrorFilter, values: rows.map((row) => row.error_kind).filter(Boolean), fallback: 'ALL ERRORS' },
+    { node: els.resultTypeFilter, values: rows.map((row) => row.content_type).filter(Boolean), fallback: 'ALL TYPES' },
+    { node: els.resultSourceFilter, values: rows.map((row) => row.source_kind).filter(Boolean), fallback: 'ALL SOURCES' },
+  ];
+  filters.forEach(({ node, values, fallback }) => {
+    const previous = node.value;
+    const options = [''].concat([...new Set(values)].sort((left, right) => String(left).localeCompare(String(right))));
+    node.innerHTML = options.map((value) => (
+      `<option value="${escapeHtml(value)}">${escapeHtml(value || fallback)}</option>`
+    )).join('');
+    node.value = options.includes(previous) ? previous : '';
+  });
+}
+
+function filteredResultRows(rows) {
+  const query = (els.resultSearch?.value || '').trim().toLowerCase();
+  return sortedResultRows(rows).filter((row) => {
+    if (els.resultStateFilter.value && row.state !== els.resultStateFilter.value) return false;
+    if (els.resultErrorFilter.value && row.error_kind !== els.resultErrorFilter.value) return false;
+    if (els.resultTypeFilter.value && row.content_type !== els.resultTypeFilter.value) return false;
+    if (els.resultSourceFilter.value && row.source_kind !== els.resultSourceFilter.value) return false;
+    if (query && !JSON.stringify(row).toLowerCase().includes(query)) return false;
+    return true;
+  });
+}
+
 function renderResultLedger(data) {
-  const rows = sortedResultRows(data.result_rows || []);
+  const allRows = data.result_rows || [];
+  populateLedgerFilterOptions(allRows);
+  const rows = filteredResultRows(allRows);
+  const exportLinks = new Map((data.exports || []).map((item) => [item.kind, item.href]));
   els.resultLedger.innerHTML = rows.length
     ? rows.map((row) => `
       <article class="result-row" data-result-row>
@@ -342,17 +394,37 @@ function renderResultLedger(data) {
           <span>type=${escapeHtml(row.content_type || '-')}</span>
           <span>depth=${escapeHtml(row.depth ?? '-')}</span>
           <span>source=${escapeHtml(row.source_page || '-')}</span>
+          <span>source_kind=${escapeHtml(row.source_kind || '-')}</span>
           <span>discovery=#${escapeHtml(row.discovery_time ?? 0)}</span>
         </div>
         ${(row.error_message || row.error_kind)
           ? `<div class="result-error">${escapeHtml(row.error_message || row.error_kind)}</div>`
           : ''}
+        <details class="result-trace">
+          <summary>TRACE</summary>
+          <div class="result-trace-grid">
+            <div><strong>DISCOVERY PATH</strong><div>${escapeHtml((row.discovery_path || []).join(' -> ') || '-')}</div></div>
+            <div><strong>REDIRECT CHAIN</strong><div>${escapeHtml((row.redirect_chain || []).join(' -> ') || '-')}</div></div>
+            <div><strong>RELATED PANEL</strong><div>${
+              row.related_panel_key
+                ? `<a class="result-link" href="#panel-${escapeHtml(row.related_panel_key)}">${escapeHtml(row.related_panel_title || row.related_panel_key)}</a>`
+                : '-'
+            }</div></div>
+            <div><strong>EXPORTS</strong><div class="result-link-list">${
+              ['json', 'csv', 'manifest-json']
+                .filter((kind) => exportLinks.has(kind))
+                .map((kind) => `<a class="result-link" href="${escapeHtml(exportLinks.get(kind) || '#')}">${escapeHtml(kind)}</a>`)
+                .join(' ') || `<a class="result-link" href="#exportPanel">sealed exports</a>`
+            }</div></div>
+          </div>
+        </details>
       </article>
     `).join('')
     : '<span class="empty-note">NO RESULT RECORDS YET</span>';
 }
 
 function renderState(data) {
+  state.lastState = data;
   state.status = data.status || 'idle';
   els.app.dataset.status = state.status;
   els.statusMessage.textContent = data.status_message || 'THE CRAWLER SLEEPS';
@@ -397,6 +469,18 @@ async function refreshState() {
     renderState(data);
   } catch (error) {
     els.errorConsole.textContent = String(error.message || error);
+  }
+}
+
+async function refreshSetupDiagnostics() {
+  try {
+    els.setupCheckStatus.textContent = 'RUNNING FIRST-RUN DIAGNOSTICS…';
+    const response = await fetch('/api/setup-check');
+    const data = await response.json();
+    renderSetupDiagnostics(data);
+  } catch (error) {
+    els.setupCheckStatus.textContent = 'FIRST-RUN DIAGNOSTICS FOUND ISSUES';
+    els.setupCheckDetail.textContent = String(error.message || error);
   }
 }
 
@@ -468,10 +552,6 @@ function applyResultFilter() {
     const visible = !query || node.textContent.toLowerCase().includes(query);
     node.style.display = visible ? '' : 'none';
   });
-  document.querySelectorAll('[data-result-row]').forEach((node) => {
-    const visible = !query || node.textContent.toLowerCase().includes(query);
-    node.style.display = visible ? '' : 'none';
-  });
   document.querySelectorAll('#resultPanels .terminal-panel').forEach((panel) => {
     const anyVisible = Array.from(panel.querySelectorAll('.result-item')).some((item) => item.style.display !== 'none');
     const hasEmpty = panel.querySelector('.empty-note');
@@ -493,16 +573,32 @@ els.form.addEventListener('keydown', (event) => {
   beginCrawl();
 });
 els.crawlMode.addEventListener('change', syncModeControls);
-els.resultSearch.addEventListener('input', applyResultFilter);
+els.resultSearch.addEventListener('input', () => {
+  if (state.lastState) {
+    renderResultLedger(state.lastState);
+  }
+  applyResultFilter();
+});
 els.resultSort.addEventListener('change', () => {
   state.sortKey = els.resultSort.value;
-  refreshState();
+  if (state.lastState) {
+    renderResultLedger(state.lastState);
+  }
+});
+['resultStateFilter', 'resultErrorFilter', 'resultTypeFilter', 'resultSourceFilter'].forEach((key) => {
+  els[key].addEventListener('change', () => {
+    if (state.lastState) {
+      renderResultLedger(state.lastState);
+    }
+  });
 });
 
 els.beginButton.addEventListener('click', beginCrawl);
 els.pauseButton.addEventListener('click', togglePause);
 els.stopButton.addEventListener('click', stopCrawl);
+els.rerunSetupCheckButton.addEventListener('click', refreshSetupDiagnostics);
 
 syncModeControls();
 refreshState();
+refreshSetupDiagnostics();
 state.timer = setInterval(refreshState, 1500);
