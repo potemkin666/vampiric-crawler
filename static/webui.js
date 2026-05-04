@@ -98,6 +98,7 @@ const els = {
   statusMessage: document.getElementById('statusMessage'),
   asciiMeter: document.getElementById('asciiMeter'),
   summaryChips: document.getElementById('summaryChips'),
+  flagStatus: document.getElementById('flagStatus'),
   setupCheckStatus: document.getElementById('setupCheckStatus'),
   setupCheckDetail: document.getElementById('setupCheckDetail'),
   rerunSetupCheckButton: document.getElementById('rerunSetupCheckButton'),
@@ -180,7 +181,13 @@ function syncModeControls() {
   const config = MODE_CONFIG[els.crawlMode.value] || MODE_CONFIG.generic;
   els.modeHint.textContent = `${config.label} // ${config.description}`;
   document.querySelectorAll('[data-flag]').forEach((node) => {
-    node.classList.toggle('is-hidden', !config.flags.includes(node.dataset.flag));
+    const visible = config.flags.includes(node.dataset.flag);
+    node.classList.toggle('is-hidden', !visible);
+    const input = node.querySelector('input');
+    if (input) {
+      input.disabled = !visible;
+      input.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    }
   });
   if (Object.prototype.hasOwnProperty.call(config.force, 'secrets')) {
     els.extractSecrets.checked = config.force.secrets;
@@ -188,7 +195,28 @@ function syncModeControls() {
   if (Object.prototype.hasOwnProperty.call(config.force, 'render')) {
     els.renderJs.checked = config.force.render;
   }
+  announceFlagSummary(`Mode changed to ${config.label}. ${describeVisibleFlags()}`);
   renderCommandPreview();
+}
+
+function describeVisibleFlags() {
+  const visibleFlags = Array.from(document.querySelectorAll('.flag-option:not(.is-hidden) .flag-label'))
+    .map((node) => node.textContent.trim());
+  return visibleFlags.length ? `Visible flags: ${visibleFlags.join(', ')}.` : 'No flag controls are visible.';
+}
+
+function announceFlagSummary(message) {
+  if (!els.flagStatus) return;
+  els.flagStatus.textContent = message;
+}
+
+function bindFlagAnnouncements() {
+  document.querySelectorAll('.flag-option input').forEach((input) => {
+    input.addEventListener('change', () => {
+      const label = input.closest('.flag-option')?.querySelector('.flag-label')?.textContent?.trim() || 'Flag';
+      announceFlagSummary(`${label} ${input.checked ? 'enabled' : 'disabled'}. ${describeVisibleFlags()}`);
+    });
+  });
 }
 
 function buildMeter(data) {
@@ -598,6 +626,7 @@ els.pauseButton.addEventListener('click', togglePause);
 els.stopButton.addEventListener('click', stopCrawl);
 els.rerunSetupCheckButton.addEventListener('click', refreshSetupDiagnostics);
 
+bindFlagAnnouncements();
 syncModeControls();
 refreshState();
 refreshSetupDiagnostics();

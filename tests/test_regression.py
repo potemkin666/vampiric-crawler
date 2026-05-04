@@ -359,6 +359,16 @@ class RegressionTests(unittest.TestCase):
                 lines = handle.read().splitlines()
             self.assertEqual(lines, ['second', 'first', 'third'])
 
+    def test_web_ui_flag_controls_use_semantic_grouping(self):
+        template = Path(REPO_ROOT, 'templates', 'index.html').read_text(encoding='utf-8')
+        stylesheet = Path(REPO_ROOT, 'static', 'webui.css').read_text(encoding='utf-8')
+        self.assertIn('<fieldset class="flag-fieldset" aria-describedby="flagHelp">', template)
+        self.assertIn('<legend>SCOPE AND EXTRACTION FLAGS</legend>', template)
+        self.assertIn('id="flagStatus" aria-live="polite" aria-atomic="true"', template)
+        self.assertNotIn('[X] EXTRACT MAIL SIGILS', template)
+        self.assertIn('.sr-only {', stylesheet)
+        self.assertIn('.flag-fieldset {', stylesheet)
+
     def test_site_anatomy_splits_third_party_buckets(self):
         anatomy = build_site_anatomy(
             'https://example.com',

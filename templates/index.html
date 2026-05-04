@@ -128,16 +128,26 @@
 
         <section class="terminal-panel settings-panel">
           <div class="panel-title">CRAWL FLAGS // RITUAL CONFIGURATION</div>
-          <div class="flag-grid">
-            <label class="flag-option" data-flag="scope"><input id="scopeDomain" type="checkbox"><span>[ ] WHOLE DOMAIN DESCENT</span></label>
-            <label class="flag-option" data-flag="intel"><input id="extractIntel" type="checkbox" checked><span>[X] EXTRACT MAIL SIGILS</span></label>
-            <label class="flag-option" data-flag="secrets"><input id="extractSecrets" type="checkbox"><span>[ ] HUNT SECRET RELICS</span></label>
-            <label class="flag-option" data-flag="robots"><input id="respectRobots" type="checkbox" checked><span>[X] HONOR ROBOTS CRAWL-DELAY</span></label>
-            <label class="flag-option" data-flag="render"><input id="renderJs" type="checkbox"><span>[ ] RENDER SHADOW DOM</span></label>
-            <label class="flag-option" data-flag="archive"><input id="archiveSeeds" type="checkbox"><span>[ ] WAKE ARCHIVE SEEDS</span></label>
-            <label class="flag-option" data-flag="dns"><input id="dns" type="checkbox"><span>[ ] TRACE BLOODLINES (DNS)</span></label>
-            <label class="flag-option" data-flag="dry"><input id="dryRun" type="checkbox"><span>[ ] DRY RUN ONLY</span></label>
-          </div>
+          <p class="flag-help" id="flagHelp">Toggle scope, extraction, and traversal rites. Mode changes may hide or force specific flags.</p>
+          <div class="sr-only" id="flagStatus" aria-live="polite" aria-atomic="true">Flag controls ready.</div>
+          <fieldset class="flag-fieldset" aria-describedby="flagHelp">
+            <legend>SCOPE AND EXTRACTION FLAGS</legend>
+            <div class="flag-grid">
+              <label class="flag-option" data-flag="scope"><input id="scopeDomain" type="checkbox"><span class="flag-label">WHOLE DOMAIN DESCENT</span></label>
+              <label class="flag-option" data-flag="intel"><input id="extractIntel" type="checkbox" checked><span class="flag-label">EXTRACT MAIL SIGILS</span></label>
+              <label class="flag-option" data-flag="secrets"><input id="extractSecrets" type="checkbox"><span class="flag-label">HUNT SECRET RELICS</span></label>
+              <label class="flag-option" data-flag="robots"><input id="respectRobots" type="checkbox" checked><span class="flag-label">HONOR ROBOTS CRAWL-DELAY</span></label>
+            </div>
+          </fieldset>
+          <fieldset class="flag-fieldset" aria-describedby="flagHelp">
+            <legend>TRAVERSAL AND SAFETY FLAGS</legend>
+            <div class="flag-grid">
+              <label class="flag-option" data-flag="render"><input id="renderJs" type="checkbox"><span class="flag-label">RENDER SHADOW DOM</span></label>
+              <label class="flag-option" data-flag="archive"><input id="archiveSeeds" type="checkbox"><span class="flag-label">WAKE ARCHIVE SEEDS</span></label>
+              <label class="flag-option" data-flag="dns"><input id="dns" type="checkbox"><span class="flag-label">TRACE BLOODLINES (DNS)</span></label>
+              <label class="flag-option" data-flag="dry"><input id="dryRun" type="checkbox"><span class="flag-label">DRY RUN ONLY</span></label>
+            </div>
+          </fieldset>
           <div class="command-buttons">
             <button type="button" id="beginButton" class="terminal-button terminal-button--primary">&gt; OPEN THE CRYPT</button>
             <button type="button" id="pauseButton" class="terminal-button">&gt; SUSPEND THE RITE</button>
