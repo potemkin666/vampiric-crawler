@@ -42,6 +42,12 @@ if not exist "%APP%" (
     exit /b 1
 )
 
+:: ── First-run diagnostics ───────────────────────────────────
+%PYTHON% "%APP%" --setup-check -o "%SCRIPT_DIR%"
+if errorlevel 1 (
+    echo [!] First-run diagnostics found issues. Review the output above before continuing.
+)
+
 :: ── Run ─────────────────────────────────────────────────────
 cd /d "%SCRIPT_DIR%"
 if "%~1"=="" (

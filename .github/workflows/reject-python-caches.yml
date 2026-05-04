@@ -1,0 +1,20 @@
+name: Reject Python caches
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  reject-caches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject committed Python cache artifacts
+        run: |
+          set -eu
+          matches="$(git ls-files | grep -E '(^|/)(__pycache__/|.*\.pyc$)' || true)"
+          if [ -n "$matches" ]; then
+            echo "Committed Python cache artifacts are not allowed:"
+            echo "$matches"
+            exit 1
+          fi

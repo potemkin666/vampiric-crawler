@@ -30,6 +30,11 @@ if [ ! -f "$APP" ]; then
     exit 1
 fi
 
+# ── First-run diagnostics ─────────────────────────────────────
+if ! $PYTHON "$APP" --setup-check -o "$SCRIPT_DIR"; then
+    echo "[!] First-run diagnostics found issues. Review the output above before continuing." >&2
+fi
+
 # ── Prompt for a target when launched without CLI args ───────
 if [ "$#" -eq 0 ]; then
     if [ -t 0 ] || [ -n "${VAMPIRIC_LAUNCH_PROMPT:-}" ]; then

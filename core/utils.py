@@ -282,7 +282,11 @@ def writer(datasets, dataset_names, output_dir):
         if dataset:
             fpath = os.path.join(output_dir, f'{name}.txt')
             with open(fpath, 'w', encoding='utf-8') as f:
-                for item in sorted(dataset):
+                if isinstance(dataset, (list, tuple)):
+                    items = dataset
+                else:
+                    items = sorted(dataset)
+                for item in items:
                     f.write(str(item) + '\n')
 
 

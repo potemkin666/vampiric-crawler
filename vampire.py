@@ -17,6 +17,7 @@
 from __future__ import print_function
 
 import argparse
+import io
 import json
 import os
 import random
@@ -38,18 +39,27 @@ from core.checkpoint import normalize_checkpoint_mapping
 import core.config
 from core.autopsy import (
     ANALYSIS_DATASET_NAMES,
+    TEMPORAL_BASELINE_FILE,
     anatomy_lines,
     build_autopsy,
+    build_crawl_manifest,
+    build_run_metadata,
     build_mutation_probes,
     build_site_anatomy,
+    build_structured_snapshot,
     finalize_genealogy,
     genealogy_lines,
+    load_previous_snapshot,
     mutation_lines,
     record_artifact_discovery,
+    restore_genealogy,
+    snapshot_exists,
     update_artifact_observation,
     write_autopsy_files,
+    write_manifest_file,
+    write_structured_snapshot_file,
 )
-from core.config import INTELS
+from core.config import INTELS, RuntimeConfig
 from core.extractors import run_page_extractors, run_script_extractors
 from core.flash import flash
 from core.modes import (
@@ -58,6 +68,7 @@ from core.modes import (
     PRESET_DEFINITIONS,
     RITUAL_CHAIN_DEFINITIONS,
     build_hidden_candidates,
+    build_hidden_candidate_records,
     build_temporal_diffs,
     coerce_preset,
     coerce_ritual_chain,
@@ -93,6 +104,29 @@ from core.specimen import (
     resolve_ritual_plan,
     setup_status,
 )
+
+
+def _configure_console_stream(stream):
+    if stream is None:
+        return stream
+    try:
+        stream.reconfigure(errors='replace')
+        return stream
+    except (AttributeError, ValueError):
+        buffer = getattr(stream, 'buffer', None)
+        if buffer is None:
+            return stream
+        return io.TextIOWrapper(
+            buffer,
+            encoding=getattr(stream, 'encoding', None) or 'utf-8',
+            errors='replace',
+            line_buffering=True,
+        )
+
+
+if __name__ == '__main__':
+    sys.stdout = _configure_console_stream(sys.stdout)
+    sys.stderr = _configure_console_stream(sys.stderr)
 
 BANNER = f"""
 {dark_red}🦇 Vampiric Crawler{end}  {crypt}v1.1.0{end}
@@ -143,6 +177,7 @@ parser.add_argument('--render-timeout', help='Per-page render timeout in seconds
 parser.add_argument('--checkpoint', help='Write crawl state to this checkpoint file')
 parser.add_argument('--resume', help='Resume a previous crawl from this checkpoint file')
 parser.add_argument('--temporal-baseline', help='Directory containing a prior crawl snapshot for temporal diff mode')
+parser.add_argument('--hidden-word', help='Extra hidden-path token to probe (repeatable)', action='append', default=[])
 parser.add_argument('--respect-robots-delay', help='Honor robots.txt Crawl-delay when present', action='store_true')
 parser.add_argument('--host-concurrency', help='Maximum concurrent requests per host (default: 2)', type=int, default=2)
 parser.add_argument('--disable-adaptive-backoff', help='Disable automatic backoff on 429/503 responses', action='store_true')
@@ -150,14 +185,25 @@ parser.add_argument('-v', '--verbose', help='Show every drop of blood (verbose o
 args = parser.parse_args()
 
 if args.setup_check:
-    status = setup_status()
+    status = setup_status(output_dir=args.output, proxy=args.proxies)
     print(f'{fang}First-run setup check')
     print(f'{crypt}Install Python deps: {status["install_hint"]}')
     print(f'{crypt}Install browser:    {status["browser_hint"]}')
     for module_name, module_status in sorted(status['packages'].items()):
         print(f'{fang}{module_name:<12} {module_status}')
     print(f'{fang}playwright-browser {status["playwright_browser"]}')
-    sys.exit(0 if all(value == 'ok' for value in status['packages'].values()) and status['playwright_browser'] == 'ok' else 1)
+    print(f'{fang}render-smoke     {status["render_smoke"]}')
+    print(f'{fang}output-dir       {status["output_dir"]["status"]} ({status["output_dir"]["path"]})')
+    print(f'{fang}proxy-sanity     {status["proxy"]["status"]} ({status["proxy"]["detail"]})')
+    sys.exit(
+        0 if (
+            all(value == 'ok' for value in status['packages'].values())
+            and status['playwright_browser'] == 'ok'
+            and status['render_smoke'] == 'ok'
+            and status['output_dir']['status'] == 'ok'
+            and status['proxy']['status'] != 'missing'
+        ) else 1
+    )
 
 resume_state = None
 if args.resume:
@@ -179,11 +225,17 @@ core.config.verbose = args.verbose
 verbose = args.verbose
 cook = args.cook or None
 checkpoint_path = args.checkpoint or args.resume
-temporal_baseline = args.temporal_baseline
+temporal_baseline = args.temporal_baseline or (resume_state.get('temporal_baseline') if resume_state else '')
 
 
 def cli_arg_present(*names):
     return any(name in sys.argv[1:] for name in names)
+
+
+def default_output_dir_name(host_name, mode_name):
+    base = re.sub(r'[^a-z0-9]+', '-', (host_name or 'specimen').lower()).strip('-') or 'specimen'
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+    return os.path.join('sealed-runs', f'{stamp}-{base}-{coerce_mode(mode_name)}')
 
 
 specimen_kind = (
@@ -239,20 +291,29 @@ resolved_config = apply_preset(
     (resume_state.get('preset') if resume_state and not cli_arg_present('--preset') else args.preset),
     explicit_options,
 )
+runtime_config = RuntimeConfig.from_mapping({
+    **resolved_config,
+    'preset': resume_state.get('preset') if resume_state and not cli_arg_present('--preset') else args.preset,
+    'ritual_chain': ritual_chain,
+    'mode': ritual_plan['mode'],
+    'temporal_baseline': temporal_baseline or '',
+    'hidden_words': args.hidden_word,
+    'verbose': args.verbose,
+})
 
-delay = float(resolved_config['delay'])
-timeout = float(resolved_config['timeout'])
-api = bool(resolved_config['extract_secrets'])
-only_urls = bool(resolved_config['only_urls'])
-crawl_level = int(resolved_config['depth'])
-thread_count = int(resolved_config['threads'])
-scope_mode = str(resolved_config['scope'])
+delay = runtime_config.delay
+timeout = runtime_config.timeout
+api = runtime_config.extract_secrets
+only_urls = runtime_config.only_urls
+crawl_level = runtime_config.depth
+thread_count = runtime_config.threads
+scope_mode = runtime_config.scope
 mode = coerce_mode(ritual_plan['mode'])
-preset = coerce_preset(resolved_config.get('preset'))
+preset = coerce_preset(runtime_config.preset)
 document_depth_forced = mode == 'document' and crawl_level < 1
-args.archive = bool(resolved_config.get('archive_seeds'))
-args.render_js = bool(resolved_config.get('render_js'))
-args.respect_robots_delay = bool(resolved_config.get('respect_robots_delay'))
+args.archive = runtime_config.archive_seeds
+args.render_js = runtime_config.render_js
+args.respect_robots_delay = runtime_config.respect_robots_delay
 dataset_names = [
     'files', 'forms', 'intel', 'robots', 'custom', 'failed', 'skipped',
     'redirects', 'internal', 'scripts', 'external', 'fuzzable',
@@ -341,6 +402,14 @@ if not main_url and not (direct_local_html or direct_local_js or direct_local_pd
         print(f'{coffin}The chosen specimen was classified as {specimen_profile.get("type")} but could not be normalized into a crawlable URL.')
         sys.exit(1)
 
+if mode == 'temporal':
+    if not temporal_baseline:
+        print(f'{coffin}Temporal mode requires an explicit --temporal-baseline path.')
+        sys.exit(1)
+    if not snapshot_exists(temporal_baseline, dataset_names):
+        print(f'{coffin}Temporal baseline not found or empty: {temporal_baseline}')
+        sys.exit(1)
+
 if args.dry_run:
     print(f'{fang}Dry run — no requests will be made.')
     print(f'{fang}Specimen type   {specimen_profile.get("type")}')
@@ -354,8 +423,8 @@ if args.dry_run:
     print(f'{fang}Threads         {thread_count}')
     print(f'{fang}Delay           {delay}')
     print(f'{fang}Timeout         {timeout}')
-    print(f'{fang}Archive seeds   {str(bool(resolved_config.get("archive_seeds"))).lower()}')
-    print(f'{fang}Render JS       {str(bool(resolved_config.get("render_js"))).lower()}')
+    print(f'{fang}Archive seeds   {str(runtime_config.archive_seeds).lower()}')
+    print(f'{fang}Render JS       {str(runtime_config.render_js).lower()}')
     print(f'{fang}Secrets         {str(api).lower()}')
     if specimen_profile.get('notes'):
         for note in specimen_profile['notes']:
@@ -367,7 +436,7 @@ try:
     domain = top_level(main_url)
 except Exception:
     domain = host
-output_dir = args.output or (resume_state.get('output_dir') if resume_state else None) or (host or 'specimen')
+output_dir = args.output or (resume_state.get('output_dir') if resume_state else None) or default_output_dir_name(host, mode)
 
 if args.user_agent:
     user_agents = [ua.strip() for ua in args.user_agent.split(',') if ua.strip()]
@@ -401,6 +470,7 @@ threads = set()
 locations = set()
 stories = set()
 hidden_paths = set()
+hidden_probe_sources = set()
 scam_signals = set()
 temporal_diffs = set()
 site_anatomy = set()
@@ -448,6 +518,7 @@ if resume_state:
     locations.update(restored['locations'])
     stories.update(restored['stories'])
     hidden_paths.update(restored['hidden_paths'])
+    hidden_probe_sources.update(restored['hidden_probe_sources'])
     scam_signals.update(restored['scam_signals'])
     temporal_diffs.update(restored['temporal_diffs'])
     site_anatomy.update(restored['site_anatomy'])
@@ -455,7 +526,7 @@ if resume_state:
     processed.update(restored['processed'])
     bad_scripts.update(restored['bad_scripts'])
     bad_intel.update(restored['bad_intel'])
-    artifact_genealogy.update(normalize_checkpoint_mapping(resume_state, 'artifact_genealogy'))
+    artifact_genealogy.update(restore_genealogy(normalize_checkpoint_mapping(resume_state, 'artifact_genealogy')))
     content_types.update(normalize_checkpoint_mapping(resume_state, 'content_types'))
     stats = CrawlStats.from_snapshot(resume_state.get('stats'))
     restored_queue_state = normalize_checkpoint_mapping(resume_state, 'queue_state')
@@ -654,6 +725,7 @@ extractor_context = {
     'locations': locations,
     'stories': stories,
     'hidden_paths': hidden_paths,
+    'hidden_probe_sources': hidden_probe_sources,
     'scam_signals': scam_signals,
     'temporal_diffs': temporal_diffs,
     'bad_scripts': bad_scripts,
@@ -690,6 +762,7 @@ def checkpoint_payload(stage):
         'domain': domain,
         'scope_mode': scope_mode,
         'mode': mode,
+        'temporal_baseline': temporal_baseline or '',
         'output_dir': output_dir,
         'stats': stats.snapshot(visited=len(processed)),
         'content_types': content_types,
@@ -727,6 +800,7 @@ def checkpoint_payload(stage):
         'locations': sorted(locations),
         'stories': sorted(stories),
         'hidden_paths': sorted(hidden_paths),
+        'hidden_probe_sources': sorted(hidden_probe_sources),
         'scam_signals': sorted(scam_signals),
         'temporal_diffs': sorted(temporal_diffs),
         'site_anatomy': sorted(site_anatomy),
@@ -747,6 +821,31 @@ def checkpoint_payload(stage):
 def write_checkpoint(stage):
     if checkpoint_path:
         save_checkpoint(checkpoint_path, checkpoint_payload(stage))
+
+
+def ordered_url_values(values, *, state=None):
+    ordered = []
+    seen = set()
+    for url, record in sorted(crawl_records.items(), key=lambda item: int((item[1] or {}).get('discovery_time') or 0)):
+        if url not in values:
+            continue
+        if state and str(record.get('state') or '') != state:
+            continue
+        ordered.append(url)
+        seen.add(url)
+    for item in values:
+        if item not in seen:
+            ordered.append(item)
+            seen.add(item)
+    return ordered
+
+
+def ordered_redirect_values(values):
+    def sort_key(item):
+        source = str(item).split(' => ', 1)[0]
+        record = crawl_records.get(source) or {}
+        return int(record.get('discovery_time') or 0), source
+    return sorted(values, key=sort_key)
 
 
 def record_request_outcome(url, result, purpose):
@@ -1015,12 +1114,26 @@ def harvest_documents():
 def discover_hidden_paths():
     if mode != 'hidden':
         return
-    guesses = build_hidden_candidates(main_url, internal, scripts, endpoints)
-    if not guesses:
+    candidate_records = build_hidden_candidate_records(
+        main_url,
+        internal,
+        scripts,
+        endpoints,
+        extra_words=runtime_config.hidden_words,
+    )
+    if not candidate_records:
         return
-    print(f'{fang}Probing {len(guesses)} shadow path{"s" if len(guesses) != 1 else ""}…')
-    for guess in guesses:
-        normalized_guess = normalize_url(guess, base_url=main_url)
+    wordlist_count = sum(1 for item in candidate_records if item['strategy'] == 'wordlist')
+    learned_count = sum(1 for item in candidate_records if item['strategy'] == 'learned')
+    print(
+        f'{fang}Probing {len(candidate_records)} shadow path{"s" if len(candidate_records) != 1 else ""}… '
+        f'(wordlist={wordlist_count}, learned={learned_count})'
+    )
+    for candidate in candidate_records:
+        hidden_probe_sources.add(
+            f'probe={candidate["probe"]} strategy={candidate["strategy"]} token={candidate["token"]} source={candidate["source"]}'
+        )
+        normalized_guess = normalize_url(candidate['probe'], base_url=main_url)
         if not normalized_guess:
             continue
         if normalized_guess in processed or normalized_guess in internal or normalized_guess in external:
@@ -1035,40 +1148,11 @@ def discover_hidden_paths():
         )
         if not record_request_outcome(normalized_guess, result, 'page'):
             continue
-        hidden_paths.add(normalized_guess)
+        hidden_paths.add(
+            f'url={normalized_guess} strategy={candidate["strategy"]} token={candidate["token"]} source={candidate["source"]}'
+        )
         response = maybe_render_page(normalized_guess, result)
         run_page_extractors(normalized_guess, response, extractor_context)
-
-
-def load_previous_snapshot(snapshot_dir):
-    if not snapshot_dir or not os.path.isdir(snapshot_dir):
-        return {}
-    snapshot = {}
-    for name in list(dataset_names) + ['stats']:
-        path = os.path.join(snapshot_dir, f'{name}.txt')
-        if not os.path.exists(path):
-            continue
-        with open(path, 'r', encoding='utf-8') as handle:
-            lines = [line.rstrip('\n') for line in handle if line.strip()]
-        if name == 'stats':
-            stats_dict = {}
-            for line in lines:
-                key, _, value = line.partition('=')
-                if key:
-                    stats_dict[key] = value
-            snapshot[name] = stats_dict
-        else:
-            snapshot[name] = lines
-    return snapshot
-
-
-def snapshot_exists(snapshot_dir):
-    if not snapshot_dir or not os.path.isdir(snapshot_dir):
-        return False
-    return any(
-        os.path.exists(os.path.join(snapshot_dir, f'{name}.txt'))
-        for name in list(dataset_names) + ['stats']
-    )
 
 
 def process_inline_specimen():
@@ -1288,27 +1372,18 @@ minutes, seconds, _ = timer(diff, processed)
 
 os.makedirs(output_dir, exist_ok=True)
 previous_snapshot = {}
+baseline_source = ''
 if mode == 'temporal':
     baseline_dir = temporal_baseline
-    if baseline_dir and snapshot_exists(baseline_dir):
-        previous_snapshot = load_previous_snapshot(baseline_dir)
-    elif snapshot_exists(output_dir):
-        previous_snapshot = load_previous_snapshot(output_dir)
+    previous_snapshot = load_previous_snapshot(baseline_dir, dataset_names)
+    baseline_source = baseline_dir
 artifact_genealogy_placeholder = set()
 datasets = [
-    files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
-    document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
-    site_anatomy, mutation_probes, artifact_genealogy_placeholder,
+    list(files), list(forms), list(intel), list(robots), list(custom), ordered_url_values(failed, state='failed'), list(skipped), ordered_redirect_values(redirects), ordered_url_values(internal),
+    ordered_url_values(scripts), ordered_url_values(external), list(fuzzable), list(endpoints), list(keys),
+    list(document_metadata), list(document_leaks), list(js_intel), list(threads), list(locations), list(stories), list(hidden_paths), list(hidden_probe_sources), list(scam_signals), list(temporal_diffs),
+    list(site_anatomy), list(mutation_probes), list(artifact_genealogy_placeholder),
 ]
-if mode == 'temporal' and previous_snapshot:
-    current_snapshot = {
-        name: sorted(dataset)
-        for name, dataset in zip(dataset_names, datasets)
-    }
-    current_snapshot['stats'] = stats.snapshot(visited=len(processed))
-    temporal_diffs.update(build_temporal_diffs(previous_snapshot, current_snapshot))
-elif mode == 'temporal':
-    temporal_diffs.add('dataset=temporal_diffs change=baseline-missing value=No prior snapshot found')
 
 datasets_dict = {
     'files': sorted(files),
@@ -1316,12 +1391,12 @@ datasets_dict = {
     'intel': sorted(intel),
     'robots': sorted(robots),
     'custom': sorted(custom),
-    'failed': sorted(failed),
+    'failed': ordered_url_values(failed, state='failed'),
     'skipped': sorted(skipped),
-    'redirects': sorted(redirects),
-    'internal': sorted(internal),
-    'scripts': sorted(scripts),
-    'external': sorted(external),
+    'redirects': ordered_redirect_values(redirects),
+    'internal': ordered_url_values(internal),
+    'scripts': ordered_url_values(scripts),
+    'external': ordered_url_values(external),
     'fuzzable': sorted(fuzzable),
     'endpoints': sorted(endpoints),
     'keys': sorted(keys),
@@ -1332,6 +1407,7 @@ datasets_dict = {
     'locations': sorted(locations),
     'stories': sorted(stories),
     'hidden_paths': sorted(hidden_paths),
+    'hidden_probe_sources': sorted(hidden_probe_sources),
     'scam_signals': sorted(scam_signals),
     'temporal_diffs': sorted(temporal_diffs),
 }
@@ -1342,9 +1418,10 @@ mutation_probes.update(mutation_lines(mutation_probe_records))
 artifact_genealogy_lines = set(genealogy_lines(artifact_genealogy))
 
 datasets = [
-    files, forms, intel, robots, custom, failed, skipped, redirects, internal, scripts, external, fuzzable, endpoints, keys,
-    document_metadata, document_leaks, js_intel, threads, locations, stories, hidden_paths, scam_signals, temporal_diffs,
-    site_anatomy, mutation_probes, artifact_genealogy_lines,
+    datasets_dict['files'], datasets_dict['forms'], datasets_dict['intel'], datasets_dict['robots'], datasets_dict['custom'], datasets_dict['failed'], datasets_dict['skipped'],
+    datasets_dict['redirects'], datasets_dict['internal'], datasets_dict['scripts'], datasets_dict['external'], datasets_dict['fuzzable'], datasets_dict['endpoints'],
+    datasets_dict['keys'], datasets_dict['document_metadata'], datasets_dict['document_leaks'], datasets_dict['js_intel'], datasets_dict['threads'], datasets_dict['locations'],
+    datasets_dict['stories'], datasets_dict['hidden_paths'], datasets_dict['hidden_probe_sources'], datasets_dict['scam_signals'], datasets_dict['temporal_diffs'], sorted(site_anatomy), sorted(mutation_probes), sorted(artifact_genealogy_lines),
 ]
 writer(datasets, dataset_names, output_dir)
 
@@ -1358,6 +1435,34 @@ datasets_dict['site_anatomy'] = sorted(site_anatomy)
 datasets_dict['mutation_probes'] = sorted(mutation_probes)
 datasets_dict['artifact_genealogy'] = sorted(artifact_genealogy_lines)
 datasets_dict['stats'] = stats_summary
+
+command = [sys.executable, os.path.abspath(__file__), *sys.argv[1:]]
+report_config = RuntimeConfig.from_mapping({
+    **runtime_config.as_dict(),
+    'ritual_chain': ritual_chain,
+    'mode': mode,
+    'preset': preset,
+    'temporal_baseline': baseline_source or temporal_baseline or '',
+    'scope_allow': [pattern.pattern for pattern in scope_allow],
+    'scope_deny': [pattern.pattern for pattern in scope_deny],
+    'resume': args.resume or '',
+    'checkpoint': checkpoint_path or '',
+    'host': host,
+    'domain': domain,
+    'verbose': verbose,
+})
+run_id = f'run-{int(then)}-{os.getpid()}'
+run_metadata = build_run_metadata(
+    run_id=run_id,
+    preset=preset,
+    mode=mode,
+    ritual_chain=ritual_chain,
+    command=command,
+    runtime_config=report_config,
+    baseline_source=baseline_source,
+    output_dir=output_dir,
+)
+export_names = ['autopsy.json', 'autopsy.md', 'stats.txt', TEMPORAL_BASELINE_FILE, *([f'results.{args.export}'] if args.export else [])]
 
 print(f'\n{dark_red}{"─" * 60}{end}')
 print(f'{blood}Harvest summary{end}')
@@ -1376,7 +1481,7 @@ if diff > 0:
 print(f'{fang}Redirects       {stats_summary["redirects"]}')
 print(f'{fang}Skipped         {stats_summary["skipped"]}')
 print(f'{fang}Failures        {stats_summary["failures"]}')
-print(f'{fang}Exported        {len(dataset_names) + 3}')
+print(f'{fang}Exported        {len(dataset_names) + len(export_names)}')
 print(f'{fang}Top types       {", ".join(f"{name}:{count}" for name, count in top_content_types) or "-"}')
 
 if args.dns:
@@ -1414,13 +1519,93 @@ autopsy = build_autopsy(
     genealogy=artifact_genealogy,
     anatomy=site_anatomy_map,
     mutation_probes=mutation_probe_records,
-    exports=['autopsy.json', 'autopsy.md', 'stats.txt', *([f'results.{args.export}'] if args.export else [])],
+    exports=export_names,
     duration_seconds=diff,
     content_types=content_types,
+    run_metadata=run_metadata,
 )
 autopsy_json_path, autopsy_md_path = write_autopsy_files(output_dir, autopsy)
+manifest = build_crawl_manifest(
+    specimen=specimen_profile,
+    ritual=ritual_plan,
+    preset=preset,
+    mode=mode,
+    command=command,
+    output_dir=output_dir,
+    main_url=main_url,
+    resolved_config=report_config.as_dict(),
+    checkpoint_path=checkpoint_path,
+    resumed_from=args.resume,
+    temporal_baseline=baseline_source or temporal_baseline,
+    run_metadata=run_metadata,
+)
+manifest_path = write_manifest_file(output_dir, manifest)
+
+if mode == 'temporal' and previous_snapshot:
+    temporal_diffs = build_temporal_diffs(
+        previous_snapshot,
+        build_structured_snapshot(
+            dataset_names=dataset_names,
+            datasets=datasets_dict,
+            stats=stats_summary,
+            autopsy=autopsy,
+            manifest=manifest,
+            content_types=content_types,
+        ),
+    )
+elif mode == 'temporal':
+    temporal_diffs = {'dataset=temporal_diffs change=baseline-missing value=No prior snapshot found'}
+
+if mode == 'temporal':
+    datasets_dict['temporal_diffs'] = sorted(temporal_diffs)
+    writer([datasets_dict['temporal_diffs']], ['temporal_diffs'], output_dir)
+    autopsy = build_autopsy(
+        specimen=specimen_profile,
+        ritual=ritual_plan,
+        preset=preset,
+        mode=mode,
+        datasets=datasets_dict,
+        stats=stats_summary,
+        genealogy=artifact_genealogy,
+        anatomy=site_anatomy_map,
+        mutation_probes=mutation_probe_records,
+        exports=export_names,
+        duration_seconds=diff,
+        content_types=content_types,
+        run_metadata=run_metadata,
+    )
+    autopsy_json_path, autopsy_md_path = write_autopsy_files(output_dir, autopsy)
+    manifest = build_crawl_manifest(
+        specimen=specimen_profile,
+        ritual=ritual_plan,
+        preset=preset,
+        mode=mode,
+        command=command,
+        output_dir=output_dir,
+        main_url=main_url,
+        resolved_config=report_config.as_dict(),
+        checkpoint_path=checkpoint_path,
+        resumed_from=args.resume,
+        temporal_baseline=baseline_source or temporal_baseline,
+        run_metadata=run_metadata,
+    )
+    manifest_path = write_manifest_file(output_dir, manifest)
+
+snapshot_path = write_structured_snapshot_file(
+    output_dir,
+    build_structured_snapshot(
+        dataset_names=dataset_names,
+        datasets=datasets_dict,
+        stats=stats_summary,
+        autopsy=autopsy,
+        manifest=manifest,
+        content_types=content_types,
+    ),
+)
 print(f'{fang}Autopsy JSON    {autopsy_json_path}')
 print(f'{fang}Autopsy MD      {autopsy_md_path}')
+print(f'{fang}Manifest        {manifest_path}')
+print(f'{fang}Baseline        {snapshot_path}')
 
 write_checkpoint('complete')
 print(f'\n{blood}The harvest is complete. Loot interred in {bold}{green}{output_dir}{end}')

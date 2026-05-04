@@ -23,11 +23,17 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from core.autopsy import (
     ANALYSIS_DATASET_NAMES,
     build_autopsy,
+    build_crawl_manifest,
+    build_run_metadata,
     build_mutation_probes,
     build_site_anatomy,
+    build_structured_snapshot,
     finalize_genealogy,
     render_autopsy_markdown,
+    write_manifest_file,
+    write_structured_snapshot_file,
 )
+from core.config import RuntimeConfig
 from core.modes import (
     MODE_DATASET_NAMES,
     MODE_DEFINITIONS,
@@ -37,7 +43,7 @@ from core.modes import (
     coerce_preset,
     coerce_ritual_chain,
 )
-from core.specimen import apply_preset, classify_specimen, resolve_ritual_plan
+from core.specimen import apply_preset, classify_specimen, resolve_ritual_plan, setup_status
 from plugins.exporter import exporter
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -133,6 +139,23 @@ def read_stats(path: Path) -> dict[str, Any]:
     return stats
 
 
+def parse_redirects(items: list[str]) -> dict[str, list[str]]:
+    """Return {source_url: [redirect trail...]} parsed from `url => a -> b` lines."""
+    mapping: dict[str, list[str]] = {}
+    for item in items:
+        source, _, trail = item.partition(' => ')
+        source = source.strip()
+        if not source or not trail:
+            continue
+        chain = []
+        for part in trail.split(' -> '):
+            cleaned = part.strip()
+            if cleaned:
+                chain.append(cleaned)
+        mapping[source] = chain
+    return mapping
+
+
 def filter_documents(items: list[str]) -> list[str]:
     doc_exts = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.rtf')
     return [item for item in items if item.lower().split('?', 1)[0].endswith(doc_exts)]
@@ -177,6 +200,7 @@ def resolve_payload(payload: dict[str, Any]) -> dict[str, Any]:
         'archive_seeds': payload.get('archive_seeds', False),
         'enumerate_subdomains': payload.get('enumerate_subdomains', False),
         'dry_run': payload.get('dry_run', False),
+        'hidden_words': payload.get('hidden_words', []),
         'preset': coerce_preset(payload.get('preset')),
         'depth': payload.get('depth', 2),
         'threads': payload.get('threads', 4),
@@ -199,6 +223,12 @@ def resolve_payload(payload: dict[str, Any]) -> dict[str, Any]:
     resolved['mode'] = coerce_mode(payload.get('mode') or resolved['mode'])
     if payload.get('temporal_baseline'):
         resolved['temporal_baseline'] = payload['temporal_baseline']
+    runtime_config = RuntimeConfig.from_mapping({
+        **resolved,
+        'ritual_chain': ritual['ritual_chain'],
+    })
+    resolved.update(runtime_config.as_dict())
+    resolved['ritual_chain'] = ritual['ritual_chain']
     return resolved
 
 
@@ -207,15 +237,14 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
     target_specimen = (payload.get('target_specimen') or '').strip()
     if not target_specimen:
         raise ValueError('TARGET SPECIMEN is required.')
+    runtime_config = RuntimeConfig.from_mapping(payload)
 
-    depth = max(1, min(int(payload.get('depth', 2)), 8))
-    threads = max(1, min(int(payload.get('threads', 4)), 32))
-    delay = max(0.0, float(payload.get('delay', 0)))
-    timeout = max(1.0, float(payload.get('timeout', 8)))
-    scope = payload.get('scope', 'host')
-    if scope not in ('host', 'domain'):
-        raise ValueError('Invalid scope.')
-    mode = coerce_mode(payload.get('mode'))
+    depth = min(runtime_config.depth, 8)
+    threads = min(runtime_config.threads, 32)
+    delay = runtime_config.delay
+    timeout = runtime_config.timeout
+    scope = runtime_config.scope
+    mode = coerce_mode(runtime_config.mode)
 
     command = [
         sys.executable,
@@ -240,7 +269,7 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         '--preset',
         coerce_preset(payload.get('preset')),
         '--input-kind',
-        str(payload.get('input_kind', 'auto')),
+        runtime_config.input_kind,
         '--checkpoint',
         str(checkpoint_path),
         '-o',
@@ -248,45 +277,52 @@ def build_crawl_command(payload: dict[str, Any], output_dir: Path, checkpoint_pa
         '-v',
     ]
 
-    if payload.get('respect_robots_delay'):
+    if runtime_config.respect_robots_delay:
         command.append('--respect-robots-delay')
-    if payload.get('render_js'):
+    if runtime_config.render_js:
         command.append('--render-js')
-    if payload.get('enumerate_subdomains'):
+    if runtime_config.enumerate_subdomains:
         command.append('--dns')
-    if payload.get('archive_seeds'):
+    if runtime_config.archive_seeds:
         command.append('--wayback')
-    if payload.get('extract_secrets'):
+    if runtime_config.extract_secrets:
         command.append('--keys')
-    if not payload.get('extract_intel', True):
+    if runtime_config.only_urls:
         command.append('--only-urls')
-    if payload.get('dry_run'):
+    if runtime_config.dry_run:
         command.append('--dry-run')
-    if payload.get('temporal_baseline'):
-        command.extend(['--temporal-baseline', str(payload['temporal_baseline'])])
+    if runtime_config.temporal_baseline:
+        command.extend(['--temporal-baseline', runtime_config.temporal_baseline])
+    for word in runtime_config.hidden_words:
+        command.extend(['--hidden-word', word])
     return command
 
 
 def command_preview(payload: dict[str, Any]) -> str:
     payload = resolve_payload(payload)
-    mode = coerce_mode(payload.get('mode'))
-    preview = f'CRAWL {(payload.get("target_specimen") or "").strip()} --depth {int(payload.get("depth", 2))}'
+    runtime_config = RuntimeConfig.from_mapping(payload)
+    mode = coerce_mode(runtime_config.mode)
+    preview = f'CRAWL {(payload.get("target_specimen") or "").strip()} --depth {runtime_config.depth}'
     if payload.get('ritual_chain'):
         preview += f' --ritual-chain {payload["ritual_chain"]}'
     if mode != 'generic':
         preview += f' --mode {mode}'
-    if payload.get('preset', 'balanced') != 'balanced':
-        preview += f' --preset {payload["preset"]}'
-    if payload.get('scope', 'host') == 'domain':
+    if runtime_config.preset != 'balanced':
+        preview += f' --preset {runtime_config.preset}'
+    if runtime_config.scope == 'domain':
         preview += ' --scope domain'
-    if payload.get('render_js'):
+    if runtime_config.render_js:
         preview += ' --render-js'
-    if payload.get('archive_seeds'):
+    if runtime_config.archive_seeds:
         preview += ' --wayback'
-    if payload.get('enumerate_subdomains'):
+    if runtime_config.enumerate_subdomains:
         preview += ' --dns'
-    if payload.get('dry_run'):
+    if runtime_config.dry_run:
         preview += ' --dry-run'
+    if runtime_config.temporal_baseline:
+        preview += f' --temporal-baseline {runtime_config.temporal_baseline}'
+    if runtime_config.hidden_words:
+        preview += f' --hidden-word {runtime_config.hidden_words[0]}'
     return preview.strip()
 
 
@@ -441,11 +477,16 @@ class CrawlRun:
             'queue': queue_snapshot if any(details.get('count') for details in queue_snapshot.values()) else checkpoint_meta['queue'],
             'robots_details': robots_metadata if robots_metadata.get('rules') or robots_metadata.get('crawl_delay') is not None else checkpoint_meta['robots'],
             'sitemap_details': sitemap_metadata if sitemap_metadata.get('sitemap_urls') or sitemap_metadata.get('queued_urls') else checkpoint_meta['sitemap'],
-            'result_rows': build_result_rows(result_records or checkpoint_meta['results']),
+            'result_rows': build_result_rows(
+                result_records or checkpoint_meta['results'],
+                redirect_lines=datasets.get('redirects', []),
+                exports=build_exports(self.output_dir),
+            ),
             'summary': build_summary(self.payload, datasets, stats),
             'panels': build_panels(self.payload, datasets, stats),
             'exports': build_exports(self.output_dir),
             'sealed_records': history,
+            'is_historical': False,
         }
 
 
@@ -520,10 +561,118 @@ def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
     return metadata
 
 
-def build_result_rows(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open('r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_saved_run_payload(output_dir: Path, checkpoint_path: Path, history_entry: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    manifest = read_json_file(output_dir / 'crawl-manifest.json')
+    target = manifest.get('target') if isinstance(manifest.get('target'), dict) else {}
+    resolved_config = manifest.get('resolved_config') if isinstance(manifest.get('resolved_config'), dict) else {}
+    lineage = manifest.get('lineage') if isinstance(manifest.get('lineage'), dict) else {}
+    if target:
+        payload.update(resolved_config)
+        payload.update({
+            'target_url': str(target.get('main_url') or ''),
+            'target_specimen': str(target.get('main_url') or ''),
+            'specimen': target.get('specimen') or {},
+            'ritual_chain': str(target.get('ritual_chain') or ''),
+            'ritual_label': str(target.get('ritual_label') or ''),
+            'preset': str(target.get('preset') or payload.get('preset') or 'balanced'),
+            'mode': str(target.get('mode') or payload.get('mode') or 'generic'),
+            'temporal_baseline': str(lineage.get('temporal_baseline') or ''),
+        })
+
+    checkpoint = read_json_file(checkpoint_path)
+    if checkpoint:
+        payload.setdefault('target_url', str(checkpoint.get('main_url') or ''))
+        payload.setdefault('target_specimen', str(checkpoint.get('specimen_input') or payload.get('target_url') or ''))
+        payload.setdefault('specimen', checkpoint.get('specimen_profile') or {})
+        payload.setdefault('ritual_chain', str(checkpoint.get('ritual_chain') or ''))
+        payload.setdefault('preset', str(checkpoint.get('preset') or payload.get('preset') or 'balanced'))
+        payload.setdefault('mode', str(checkpoint.get('mode') or payload.get('mode') or 'generic'))
+        payload.setdefault('output_dir', str(checkpoint.get('output_dir') or output_dir))
+
+    if history_entry:
+        payload.setdefault('target_url', str(history_entry.get('target_url') or ''))
+        payload.setdefault('target_specimen', str(history_entry.get('target_url') or payload.get('target_url') or ''))
+        payload.setdefault('mode', str(history_entry.get('mode') or payload.get('mode') or 'generic'))
+
+    payload.setdefault('target_url', '')
+    payload.setdefault('target_specimen', payload.get('target_url', ''))
+    payload.setdefault('preset', 'balanced')
+    payload.setdefault('mode', 'generic')
+    return payload
+
+
+def build_saved_run_snapshot(run_id: str, output_dir: Path, checkpoint_path: Path, history: list[dict[str, Any]], history_entry: dict[str, Any] | None = None) -> dict[str, Any]:
+    datasets, stats = collect_run_artifacts(output_dir, checkpoint_path)
+    checkpoint_meta = load_checkpoint_metadata(checkpoint_path)
+    payload = load_saved_run_payload(output_dir, checkpoint_path, history_entry)
+    exports = build_exports(output_dir, run_id=run_id)
+    status = str((history_entry or {}).get('status') or ('complete' if any(datasets.values()) or stats else 'empty'))
+    return {
+        'id': run_id,
+        'status': status,
+        'status_message': STATUS_MESSAGES.get(status, STATUS_MESSAGES['idle']),
+        'status_detail': 'SEALED RECORD REOPENED',
+        'target_url': payload.get('target_url', ''),
+        'target_specimen': payload.get('target_specimen', payload.get('target_url', '')),
+        'specimen_type': payload.get('specimen', {}).get('type', 'url'),
+        'ritual_chain': coerce_ritual_chain(payload.get('ritual_chain')),
+        'ritual_label': payload.get('ritual_label', ''),
+        'preset': coerce_preset(payload.get('preset')),
+        'mode': coerce_mode(payload.get('mode')),
+        'mode_label': mode_label(payload.get('mode', 'generic')),
+        'mode_description': mode_description(payload.get('mode', 'generic')),
+        'command_preview': command_preview(payload) if (payload.get('target_specimen') or payload.get('target_url')) else 'CRAWL --sealed-record',
+        'command': [],
+        'started_at': None,
+        'ended_at': (history_entry or {}).get('ended_at'),
+        'output_dir': str(output_dir),
+        'can_pause': False,
+        'can_resume': False,
+        'can_stop': False,
+        'logs': [],
+        'feed': [],
+        'errors': [],
+        'queue': checkpoint_meta['queue'],
+        'robots_details': checkpoint_meta['robots'],
+        'sitemap_details': checkpoint_meta['sitemap'],
+        'result_rows': build_result_rows(checkpoint_meta['results'], redirect_lines=datasets.get('redirects', []), exports=exports),
+        'summary': build_summary(payload, datasets, stats),
+        'panels': build_panels(payload, datasets, stats),
+        'exports': exports,
+        'sealed_records': history,
+        'is_historical': True,
+    }
+
+
+def build_result_rows(
+    records: dict[str, dict[str, Any]],
+    redirect_lines: list[str] | None = None,
+    exports: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    redirect_map = parse_redirects(redirect_lines or [])
+    export_kinds = [item['kind'] for item in (exports or [])]
     rows = []
     for url, raw in sorted(records.items(), key=lambda item: int((item[1] or {}).get('discovery_time') or 0)):
         raw = raw or {}
+        state = str(raw.get('state') or 'pending')
+        source_kind = str(raw.get('source_kind') or '')
+        related_panel_key, related_panel_title = related_panel_for_row(
+            state=state,
+            source_kind=source_kind,
+            content_type=str(raw.get('content_type') or ''),
+        )
         rows.append({
             'url': str(raw.get('url') or url),
             'status_code': raw.get('status_code'),
@@ -531,12 +680,29 @@ def build_result_rows(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]
             'depth': raw.get('depth'),
             'source_page': str(raw.get('source_page') or ''),
             'discovery_time': int(raw.get('discovery_time') or 0),
-            'state': str(raw.get('state') or 'pending'),
+            'state': state,
             'error_kind': str(raw.get('error_kind') or ''),
             'error_message': str(raw.get('error_message') or ''),
-            'source_kind': str(raw.get('source_kind') or ''),
+            'source_kind': source_kind,
+            'redirect_chain': redirect_map.get(str(raw.get('url') or url), []),
+            'discovery_path': [item for item in (str(raw.get('source_page') or ''), str(raw.get('url') or url)) if item],
+            'related_panel_key': related_panel_key,
+            'related_panel_title': related_panel_title,
+            'export_kinds': export_kinds,
         })
     return rows
+
+
+def related_panel_for_row(*, state: str, source_kind: str, content_type: str) -> tuple[str, str]:
+    lowered_kind = source_kind.lower()
+    lowered_type = content_type.lower()
+    if state in {'failed', 'skipped'}:
+        return 'broken', 'BROKEN GATES'
+    if 'script' in lowered_kind or 'javascript' in lowered_type:
+        return 'scripts', 'SCRIPT BONES'
+    if 'document' in lowered_kind or any(token in lowered_type for token in ('pdf', 'msword', 'officedocument')):
+        return 'documents', 'DOCUMENT TOMBS'
+    return 'links', 'CRYPT PATHS'
 
 
 def build_summary(payload: dict[str, Any], datasets: dict[str, list[str]], stats: dict[str, Any]) -> dict[str, Any]:
@@ -588,16 +754,16 @@ def build_summary_cards(mode: str, datasets: dict[str, list[str]], stats: dict[s
             {'label': 'REPLIES', 'value': len([item for item in datasets.get('threads', []) if 'reply_to=' in item])},
         ],
         'geo': [
-            {'label': 'PLACES', 'value': len(datasets.get('locations', []))},
-            {'label': 'MAP', 'value': len([item for item in datasets.get('locations', []) if 'lat=' in item and 'lon=' in item])},
+            {'label': 'EXACT', 'value': len([item for item in datasets.get('locations', []) if 'confidence=exact' in item])},
+            {'label': 'WEAK', 'value': len([item for item in datasets.get('locations', []) if 'confidence=weak' in item])},
         ],
         'news': [
-            {'label': 'STORIES', 'value': len([item for item in datasets.get('stories', []) if ' title=' in item])},
-            {'label': 'REFS', 'value': len([item for item in datasets.get('stories', []) if 'reference=' in item])},
+            {'label': 'PAGES', 'value': len([item for item in datasets.get('stories', []) if ' relation=page ' in item])},
+            {'label': 'MIRRORS', 'value': len([item for item in datasets.get('stories', []) if ' relation=mirror ' in item])},
         ],
         'hidden': [
             {'label': 'SHADOWS', 'value': len(datasets.get('hidden_paths', []))},
-            {'label': 'ENDPTS', 'value': len(datasets.get('endpoints', []))},
+            {'label': 'PROBES', 'value': len(datasets.get('hidden_probe_sources', []))},
         ],
         'scam': [
             {'label': 'HEXES', 'value': len(datasets.get('scam_signals', []))},
@@ -631,6 +797,7 @@ def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats:
         'locations': {'key': 'locations', 'title': 'BLOOD MAP POINTS', 'count': len(datasets.get('locations', [])), 'items': datasets.get('locations', [])[:TEXT_LIMIT]},
         'stories': {'key': 'stories', 'title': 'MUTATING STORY CHAINS', 'count': len(datasets.get('stories', [])), 'items': datasets.get('stories', [])[:TEXT_LIMIT]},
         'hidden_paths': {'key': 'hidden_paths', 'title': 'SHADOW GATES', 'count': len(datasets.get('hidden_paths', [])), 'items': datasets.get('hidden_paths', [])[:TEXT_LIMIT]},
+        'hidden_probe_sources': {'key': 'hidden_probe_sources', 'title': 'SHADOW PROBE SOURCES', 'count': len(datasets.get('hidden_probe_sources', [])), 'items': datasets.get('hidden_probe_sources', [])[:TEXT_LIMIT]},
         'scam_signals': {'key': 'scam_signals', 'title': 'HEXED MERCHANT OMENS', 'count': len(datasets.get('scam_signals', [])), 'items': datasets.get('scam_signals', [])[:TEXT_LIMIT]},
         'temporal_diffs': {'key': 'temporal_diffs', 'title': 'TIME-SLICE OMENS', 'count': len(datasets.get('temporal_diffs', [])), 'items': datasets.get('temporal_diffs', [])[:TEXT_LIMIT]},
         'site_anatomy': {'key': 'site_anatomy', 'title': 'SITE ANATOMY', 'count': len(datasets.get('site_anatomy', [])), 'items': datasets.get('site_anatomy', [])[:TEXT_LIMIT]},
@@ -643,7 +810,7 @@ def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats:
         'forum': ['threads', 'links', 'mail', 'vitals'],
         'geo': ['locations', 'links', 'vitals'],
         'news': ['stories', 'links', 'vitals'],
-        'hidden': ['hidden_paths', 'links', 'broken', 'vitals'],
+        'hidden': ['hidden_paths', 'hidden_probe_sources', 'links', 'broken', 'vitals'],
         'scam': ['scam_signals', 'links', 'forms', 'vitals'],
         'temporal': ['temporal_diffs', 'artifact_genealogy', 'links', 'vitals'],
         'generic': ['site_anatomy', 'mutation_probes', 'links', 'mail', 'documents', 'relics', 'scripts', 'broken', 'forms', 'vitals'],
@@ -653,16 +820,18 @@ def build_panels(payload: dict[str, Any], datasets: dict[str, list[str]], stats:
     return selected
 
 
-def build_exports(output_dir: Path) -> list[dict[str, str]]:
+def build_exports(output_dir: Path, run_id: str | None = None) -> list[dict[str, str]]:
     files = (
         ('json', 'EXPORT JSON', output_dir / 'results.json'),
         ('csv', 'EXPORT CSV', output_dir / 'results.csv'),
         ('autopsy-json', 'AUTOPSY JSON', output_dir / 'autopsy.json'),
         ('autopsy-md', 'AUTOPSY MD', output_dir / 'autopsy.md'),
+        ('manifest-json', 'CRAWL MANIFEST', output_dir / 'crawl-manifest.json'),
         ('bundle', 'EXPORT BUNDLE', output_dir / 'sealed-bundle.zip'),
     )
+    href_prefix = f'/api/runs/{run_id}/exports' if run_id else '/api/exports'
     return [
-        {'kind': kind, 'label': label, 'href': f'/api/exports/{kind}'}
+        {'kind': kind, 'label': label, 'href': f'{href_prefix}/{kind}'}
         for kind, label, path in files
         if path.exists()
     ]
@@ -672,6 +841,7 @@ def ensure_exports(run: CrawlRun) -> None:
     if run.exports_ready:
         return
     datasets, stats = collect_run_artifacts(run.output_dir, run.checkpoint_path)
+    runtime_config = RuntimeConfig.from_mapping(run.payload)
     payload = {name: values for name, values in datasets.items() if values}
     if stats:
         payload['stats'] = stats
@@ -681,6 +851,17 @@ def ensure_exports(run: CrawlRun) -> None:
     exporter(str(run.output_dir), 'csv', payload)
     anatomy = build_site_anatomy(run.payload.get('target_url', ''), datasets, {}, run.payload.get('specimen', {}))
     probes = build_mutation_probes(run.payload.get('target_url', ''), datasets)
+    run_metadata = build_run_metadata(
+        run_id=run.run_id,
+        preset=coerce_preset(run.payload.get('preset')),
+        mode=coerce_mode(run.payload.get('mode')),
+        ritual_chain=coerce_ritual_chain(run.payload.get('ritual_chain')),
+        command=run.command,
+        runtime_config=runtime_config,
+        baseline_source=str(run.payload.get('temporal_baseline') or ''),
+        output_dir=str(run.output_dir),
+        saved_at=run.ended_at or now_iso(),
+    )
     autopsy = build_autopsy(
         specimen=run.payload.get('specimen', {}),
         ritual={
@@ -697,11 +878,40 @@ def ensure_exports(run: CrawlRun) -> None:
         exports=['results.json', 'results.csv', 'autopsy.json', 'autopsy.md', 'sealed-bundle.zip'],
         duration_seconds=float(stats.get('duration_seconds', 0) or 0),
         content_types={},
+        run_metadata=run_metadata,
     )
     autopsy_json_path = run.output_dir / 'autopsy.json'
     autopsy_md_path = run.output_dir / 'autopsy.md'
     autopsy_json_path.write_text(json.dumps(autopsy, indent=2, ensure_ascii=False), encoding='utf-8')
     autopsy_md_path.write_text(render_autopsy_markdown(autopsy), encoding='utf-8')
+    manifest = build_crawl_manifest(
+        specimen=run.payload.get('specimen', {}),
+        ritual={
+            'ritual_chain': coerce_ritual_chain(run.payload.get('ritual_chain')),
+            'label': run.payload.get('ritual_label', ''),
+        },
+        preset=coerce_preset(run.payload.get('preset')),
+        mode=coerce_mode(run.payload.get('mode')),
+        command=run.command,
+        output_dir=str(run.output_dir),
+        main_url=run.payload.get('target_url', ''),
+        resolved_config=runtime_config.as_dict(),
+        checkpoint_path=str(run.checkpoint_path),
+        temporal_baseline=str(run.payload.get('temporal_baseline') or ''),
+        run_metadata=run_metadata,
+    )
+    write_manifest_file(str(run.output_dir), manifest)
+    write_structured_snapshot_file(
+        str(run.output_dir),
+        build_structured_snapshot(
+            dataset_names=DATASET_FILES,
+            datasets=datasets,
+            stats=stats,
+            autopsy=autopsy,
+            manifest=manifest,
+            content_types={},
+        ),
+    )
     bundle_path = run.output_dir / 'sealed-bundle.zip'
     with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for child in sorted(run.output_dir.iterdir()):
@@ -715,6 +925,54 @@ def ensure_exports(run: CrawlRun) -> None:
         }, indent=2, ensure_ascii=False))
         archive.writestr('crawl-log.txt', '\n'.join(list(run.logs)))
     run.exports_ready = True
+
+
+def build_setup_diagnostics(output_dir: Path, proxy: str | None = None) -> dict[str, Any]:
+    status = setup_status(output_dir=str(output_dir), proxy=proxy)
+    safe_packages = {
+        name: _public_check_status(value)
+        for name, value in sorted(status['packages'].items())
+    }
+    safe_output_dir = {
+        'path': status['output_dir']['path'],
+        'status': 'ok' if status['output_dir']['status'] == 'ok' else 'missing',
+        'detail': status['output_dir']['path'] if status['output_dir']['status'] == 'ok' else 'Review the CLI setup check output for write-path remediation.',
+    }
+    safe_proxy = {
+        'status': status['proxy']['status'],
+        'detail': status['proxy']['detail'] if status['proxy']['status'] in {'ok', 'not-configured'} else 'Review the CLI setup check output for proxy remediation.',
+    }
+    checks = [
+        {'name': f'package:{name}', 'status': safe_packages[name], 'detail': _public_check_detail(value)}
+        for name, value in sorted(status['packages'].items())
+    ]
+    checks.extend([
+        {'name': 'playwright-browser', 'status': _public_check_status(status['playwright_browser']), 'detail': _public_check_detail(status['playwright_browser'])},
+        {'name': 'render-smoke', 'status': _public_check_status(status['render_smoke']), 'detail': _public_check_detail(status['render_smoke'])},
+        {'name': 'output-dir', 'status': safe_output_dir['status'], 'detail': safe_output_dir['detail']},
+        {'name': 'proxy-sanity', 'status': safe_proxy['status'], 'detail': safe_proxy['detail']},
+    ])
+    issues = [item for item in checks if str(item['status']) not in {'ok', 'not-configured'}]
+    return {
+        'packages': safe_packages,
+        'playwright_browser': _public_check_status(status['playwright_browser']),
+        'render_smoke': _public_check_status(status['render_smoke']),
+        'output_dir': safe_output_dir,
+        'proxy': safe_proxy,
+        'install_hint': status['install_hint'],
+        'browser_hint': status['browser_hint'],
+        'checks': checks,
+        'overall_status': 'ok' if not issues else 'issues',
+        'status_message': 'FIRST-RUN DIAGNOSTICS CLEAR' if not issues else 'FIRST-RUN DIAGNOSTICS FOUND ISSUES',
+    }
+
+
+def _public_check_status(value: str) -> str:
+    return 'ok' if str(value) == 'ok' else 'missing'
+
+
+def _public_check_detail(value: str) -> str:
+    return 'Dependency ready.' if str(value) == 'ok' else 'Review setup-check output in the CLI for exact remediation.'
 
 
 class CrawlManager:
@@ -738,9 +996,7 @@ class CrawlManager:
                 run_id = f'{base_run_id}-{suffix}'
             output_dir = self.runs_root / run_id
             if payload['mode'] == 'temporal' and not payload.get('temporal_baseline'):
-                baseline = self._latest_baseline(payload.get('target_url', ''), exclude_dir=output_dir)
-                if baseline is not None:
-                    payload['temporal_baseline'] = str(baseline.resolve())
+                raise ValueError('Temporal mode requires an explicit baseline path.')
             output_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_path = output_dir / 'checkpoint.json'
             command = build_crawl_command(payload, output_dir, checkpoint_path)
@@ -767,19 +1023,6 @@ class CrawlManager:
             thread = threading.Thread(target=self._monitor_run, args=(run,), daemon=True)
             thread.start()
             return run
-
-    def _latest_baseline(self, target_url: str, exclude_dir: Path | None = None) -> Path | None:
-        target_slug = slugify_target(target_url)
-        candidates = []
-        for entry in self.runs_root.iterdir():
-            if not entry.is_dir() or target_slug not in entry.name:
-                continue
-            if exclude_dir is not None and entry == exclude_dir:
-                continue
-            if self.current_run and entry == self.current_run.output_dir:
-                continue
-            candidates.append(entry)
-        return sorted(candidates)[-1] if candidates else None
 
     def _monitor_run(self, run: CrawlRun) -> None:
         assert run.process is not None
@@ -810,6 +1053,9 @@ class CrawlManager:
             'ended_at': run.ended_at,
             'status': run.status,
             'status_message': STATUS_MESSAGES.get(run.status, STATUS_MESSAGES['idle']),
+            'output_dir': str(run.output_dir),
+            'state_href': f'/api/runs/{run.run_id}',
+            'exports': build_exports(run.output_dir, run_id=run.run_id),
         })
 
     def pause(self) -> CrawlRun:
@@ -872,6 +1118,7 @@ class CrawlManager:
                 'panels': build_panels({}, {}, {}),
                 'exports': [],
                 'sealed_records': list(self.history),
+                'is_historical': False,
                 'can_pause': False,
                 'can_resume': False,
                 'can_stop': False,
@@ -884,19 +1131,56 @@ class CrawlManager:
         run = self.current_run
         if not run:
             raise FileNotFoundError('No sealed record available.')
-        if run.status == 'complete':
-            ensure_exports(run)
+        return self.export_path_for_run(run.run_id, kind)
+
+    def run_state(self, run_id: str) -> dict[str, Any]:
+        if self.current_run and self.current_run.run_id == run_id:
+            if self.current_run.status == 'complete':
+                ensure_exports(self.current_run)
+            return self.current_run.snapshot(list(self.history))
+        history = list(self.history)
+        history_entry = next((item for item in history if item.get('id') == run_id), None)
+        output_dir = self._run_dir(run_id, history_entry)
+        checkpoint_path = output_dir / 'checkpoint.json'
+        return build_saved_run_snapshot(run_id, output_dir, checkpoint_path, history, history_entry)
+
+    def export_path_for_run(self, run_id: str, kind: str) -> Path:
+        if self.current_run and self.current_run.run_id == run_id:
+            run = self.current_run
+            if run.status == 'complete':
+                ensure_exports(run)
+            output_dir = run.output_dir
+        else:
+            history_entry = next((item for item in self.history if item.get('id') == run_id), None)
+            output_dir = self._run_dir(run_id, history_entry)
         mapping = {
-            'json': run.output_dir / 'results.json',
-            'csv': run.output_dir / 'results.csv',
-            'autopsy-json': run.output_dir / 'autopsy.json',
-            'autopsy-md': run.output_dir / 'autopsy.md',
-            'bundle': run.output_dir / 'sealed-bundle.zip',
+            'json': output_dir / 'results.json',
+            'csv': output_dir / 'results.csv',
+            'autopsy-json': output_dir / 'autopsy.json',
+            'autopsy-md': output_dir / 'autopsy.md',
+            'manifest-json': output_dir / 'crawl-manifest.json',
+            'bundle': output_dir / 'sealed-bundle.zip',
         }
         path = mapping.get(kind)
         if path is None or not path.exists():
             raise FileNotFoundError(kind)
         return path
+
+    def _run_dir(self, run_id: str, history_entry: dict[str, Any] | None = None) -> Path:
+        if not re.fullmatch(r'[A-Za-z0-9._-]+', run_id or ''):
+            raise FileNotFoundError(run_id)
+        candidate = (history_entry or {}).get('output_dir') or (self.runs_root / run_id)
+        path = Path(candidate).resolve()
+        allowed_root = self.runs_root.resolve()
+        if path == allowed_root:
+            raise FileNotFoundError(run_id)
+        if path.exists() and path.is_dir() and (path.parent == allowed_root or str(path).startswith(str(allowed_root) + os.sep)):
+            return path
+        fallback = (self.runs_root / run_id).resolve()
+        if fallback.exists() and fallback.is_dir() and fallback.parent == allowed_root:
+            return fallback
+        else:
+            raise FileNotFoundError(run_id)
 
     def _active_run(self, allow_paused: bool = False) -> CrawlRun:
         run = self.current_run
@@ -941,13 +1225,21 @@ def create_app(runs_root: Path | None = None) -> Flask:
             'preset_description': PRESET_DEFINITIONS[coerce_preset(resolved.get('preset'))]['description'],
         })
 
+    @app.route('/api/setup-check', methods=['GET', 'POST'])
+    def setup_check() -> Any:
+        try:
+            diagnostics = build_setup_diagnostics(RUNS_ROOT)
+        except Exception as exc:
+            return error_response('First-run diagnostics failed.', 500, exc)
+        return jsonify(diagnostics)
+
     @app.post('/api/crawl')
     def start_crawl() -> Any:
         payload = request.get_json(silent=True) or {}
         try:
             run = app.config['CRAWL_MANAGER'].start(payload)
         except ValueError as exc:
-            return error_response('The target specimen is malformed.', 400, exc)
+            return error_response(str(exc) or 'The target specimen is malformed.', 400, exc)
         except RuntimeError as exc:
             return error_response('Another crawl rite is already active.', 409, exc)
         return jsonify(run.snapshot(list(app.config['CRAWL_MANAGER'].history))), 202
@@ -980,6 +1272,22 @@ def create_app(runs_root: Path | None = None) -> Flask:
     def export(kind: str) -> Any:
         try:
             path = app.config['CRAWL_MANAGER'].export_path(kind)
+        except FileNotFoundError:
+            abort(404)
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.get('/api/runs/<run_id>')
+    def run_state(run_id: str) -> Any:
+        try:
+            snapshot = app.config['CRAWL_MANAGER'].run_state(run_id)
+        except FileNotFoundError:
+            abort(404)
+        return jsonify(snapshot)
+
+    @app.get('/api/runs/<run_id>/exports/<kind>')
+    def run_export(run_id: str, kind: str) -> Any:
+        try:
+            path = app.config['CRAWL_MANAGER'].export_path_for_run(run_id, kind)
         except FileNotFoundError:
             abort(404)
         return send_file(path, as_attachment=True, download_name=path.name)

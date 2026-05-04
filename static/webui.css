@@ -330,13 +330,42 @@ body::after {
   gap: 0.3rem;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .flag-option.is-hidden {
   display: none;
 }
 
 .field-grid label span,
-.flag-option span {
+.flag-option span,
+.flag-help,
+.flag-fieldset legend {
   color: var(--text-bone);
+}
+
+.flag-help {
+  margin: 0 0 0.85rem;
+}
+
+.flag-fieldset {
+  margin: 0 0 0.9rem;
+  padding: 0.8rem;
+  border: 1px dashed rgba(133, 255, 152, 0.3);
+}
+
+.flag-fieldset legend {
+  padding: 0 0.4rem;
+  letter-spacing: 0.08em;
 }
 
 .field-grid input {
@@ -366,12 +395,17 @@ body::after {
   box-shadow: inset 0 0 0 1px rgba(133, 255, 152, 0.12);
 }
 
-.flag-option:has(input:checked) span::before {
+.flag-option:has(input:checked) .flag-label::before {
   content: "[X] ";
 }
 
-.flag-option span::before {
+.flag-option .flag-label::before {
   content: "[ ] ";
+}
+
+.flag-option:has(input:focus-visible) {
+  outline: 1px dashed rgba(227, 161, 63, 0.8);
+  outline-offset: 2px;
 }
 
 .command-buttons,
@@ -503,6 +537,7 @@ body::after {
 
 .result-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
   margin-top: 0.75rem;
@@ -527,6 +562,35 @@ body::after {
 .result-error {
   margin-top: 0.55rem;
   color: var(--accent-amber);
+}
+
+.result-trace {
+  margin-top: 0.75rem;
+  border-top: 1px dotted rgba(133, 255, 152, 0.12);
+  padding-top: 0.65rem;
+}
+
+.result-trace summary {
+  cursor: pointer;
+  color: var(--accent-amber);
+}
+
+.result-trace-grid {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+  color: var(--text-bone);
+}
+
+.result-link,
+.result-link:visited {
+  color: var(--text-phosphor);
+}
+
+.result-link-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .result-item {

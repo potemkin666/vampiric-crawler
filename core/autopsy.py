@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import re
+import subprocess
+import sys
 from urllib.parse import urlsplit
+
+from core.config import RuntimeConfig
 
 ANALYSIS_DATASET_NAMES = (
     'site_anatomy',
     'mutation_probes',
     'artifact_genealogy',
 )
+TEMPORAL_BASELINE_FILE = 'temporal-baseline.json'
 
 AUTH_RE = re.compile(r'/(?:login|logout|signin|signout|auth|register|password|session|account)\b', re.I)
 API_RE = re.compile(r'/(?:api|graphql|graphiql|swagger|openapi|v\d+/)', re.I)
@@ -22,6 +29,7 @@ STATIC_EXTS = ('.js', '.css', '.map', '.png', '.jpg', '.jpeg', '.gif', '.svg', '
 TRUST_RE = re.compile(r'(?:github|discord|slack|trustpilot|statuspage|linkedin|twitter|x\.com|facebook|docs|privacy|terms)', re.I)
 ANALYTICS_RE = re.compile(r'(?:google-analytics|googletagmanager|segment|mixpanel|amplitude|gtm-|ua-\d+|ga4)', re.I)
 CDN_RE = re.compile(r'(?:cloudfront\.net|amazonaws\.com|storage\.googleapis\.com|blob\.core\.windows\.net|cdn\.|fastly|akamai)', re.I)
+HASH_CHUNK_SIZE = 65536
 
 
 def record_artifact_discovery(
@@ -126,6 +134,34 @@ def finalize_genealogy(genealogy: dict[str, dict[str, object]]) -> dict[str, dic
     return finalized
 
 
+def restore_genealogy(genealogy: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Return checkpointed genealogy data with set-backed fields restored."""
+    restored: dict[str, dict[str, object]] = {}
+    if not isinstance(genealogy, dict):
+        return restored
+    for url, record in genealogy.items():
+        if not isinstance(record, dict):
+            continue
+        restored[str(url)] = {
+            'url': str(record.get('url') or url),
+            'found_on': set(record.get('found_on') or ()),
+            'linked_by': set(record.get('linked_by') or ()),
+            'source_kinds': set(record.get('source_kinds') or ()),
+            'content_type': str(record.get('content_type') or ''),
+            'size': int(record.get('size') or 0),
+            'sha256': str(record.get('sha256') or ''),
+            'title': str(record.get('title') or ''),
+            'metadata': set(record.get('metadata') or ()),
+            'archive_presence': bool(record.get('archive_presence')),
+            'duplicates': set(record.get('duplicates') or ()),
+            'redirects': set(record.get('redirects') or ()),
+            'first_seen': str(record.get('first_seen') or ''),
+            'last_seen': str(record.get('last_seen') or ''),
+            'notes': set(record.get('notes') or ()),
+        }
+    return restored
+
+
 def genealogy_lines(genealogy: dict[str, dict[str, object]]) -> list[str]:
     """Return compact artifact genealogy lines."""
     lines = []
@@ -169,15 +205,20 @@ def build_site_anatomy(
     static_assets = _unique([url for url in files if _path_matches(url, STATIC_EXTS)] + scripts)
     admin_ish = _unique([url for url in internals + failed if ADMIN_RE.search(url)])
     old_paths = _unique([url for url in internals + failed + files if OLD_RE.search(url)])
-    third_party = _unique([
+    analytics = _unique([url for url in externals if ANALYTICS_RE.search(url)])
+    cdn_assets = _unique([url for url in externals if CDN_RE.search(url)])
+    external_trust = _unique([url for url in externals if TRUST_RE.search(url)])
+    external_refs = _unique([
         url for url in externals
-        if ANALYTICS_RE.search(url) or CDN_RE.search(url) or _external_host(url, main_url)
+        if _external_host(url, main_url)
+        and url not in analytics
+        and url not in cdn_assets
+        and url not in external_trust
     ])
     archive_only = _unique([
         url for url, record in finalize_genealogy(genealogy).items()
         if record['archive_presence'] and url not in internals and url not in files
     ])
-    external_trust = _unique([url for url in externals if TRUST_RE.search(url)])
     dead_ends = _unique(failed + datasets.get('skipped', []))
 
     anatomy = {
@@ -188,9 +229,11 @@ def build_site_anatomy(
         'static_assets': static_assets,
         'admin_ish_routes': admin_ish,
         'old_paths': old_paths,
-        'third_party_dependencies': third_party,
+        'analytics': analytics,
+        'cdn_assets': cdn_assets,
+        'external_refs': external_refs,
         'archive_only_paths': archive_only,
-        'external_trust_links': external_trust,
+        'trust_links': external_trust,
         'dead_ends': dead_ends,
     }
     if specimen.get('archive_hint'):
@@ -267,6 +310,7 @@ def build_autopsy(
     exports: list[str] | None = None,
     duration_seconds: float | int | None = None,
     content_types: dict[str, int] | None = None,
+    run_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Return the final crawl autopsy."""
     finalized_genealogy = finalize_genealogy(genealogy)
@@ -279,7 +323,7 @@ def build_autopsy(
     }
     what_broke = datasets.get('failed', []) + datasets.get('skipped', [])
     what_changed = datasets.get('temporal_diffs', [])
-    what_looks_fake = datasets.get('scam_signals', []) + anatomy.get('external_trust_links', [])
+    what_looks_fake = datasets.get('scam_signals', []) + anatomy.get('trust_links', [])
     worth_probing_next = [item['probe'] for item in mutation_probes[:12]]
     return {
         'what_the_target_is': {
@@ -303,6 +347,7 @@ def build_autopsy(
         'mutation_engine': mutation_probes,
         'artifact_genealogy': finalized_genealogy,
         'endpoint_archaeology': datasets.get('js_intel', []),
+        'run_metadata': dict(run_metadata or {}),
         'run_summary': {
             'pages_crawled': int(stats.get('visited', len(datasets.get('internal', []))) or 0),
             'skipped': int(stats.get('skipped', len(datasets.get('skipped', []))) or 0),
@@ -318,6 +363,8 @@ def render_autopsy_markdown(autopsy: dict[str, object]) -> str:
     """Render a readable Markdown autopsy."""
     target = autopsy.get('what_the_target_is', {})
     anatomy = autopsy.get('site_anatomy', {})
+    run_metadata = autopsy.get('run_metadata', {})
+    runtime = run_metadata.get('runtime', {}) if isinstance(run_metadata, dict) else {}
     summary = autopsy.get('run_summary', {})
     lines = [
         '# Vampiric Crawler Autopsy',
@@ -335,6 +382,14 @@ def render_autopsy_markdown(autopsy: dict[str, object]) -> str:
         f'- Skipped: {summary.get("skipped", 0)}',
         f'- Failed: {summary.get("failed", 0)}',
         f'- Duration (s): {float(summary.get("duration_seconds") or 0):.2f}',
+        '',
+        '## Run metadata',
+        f'- Run ID: `{run_metadata.get("run_id", "-")}`',
+        f'- Saved at: `{run_metadata.get("saved_at", "-")}`',
+        f'- Command: `{run_metadata.get("command_line", "-")}`',
+        f'- Baseline source: `{run_metadata.get("baseline_source", "-")}`',
+        f'- Git commit: `{runtime.get("git_commit", "-")}`',
+        f'- Python: `{runtime.get("python_version", "-")}`',
         '',
         '## Site anatomy',
     ]
@@ -370,6 +425,198 @@ def write_autopsy_files(output_dir: str, autopsy: dict[str, object]) -> tuple[st
     with open(md_path, 'w', encoding='utf-8') as handle:
         handle.write(render_autopsy_markdown(autopsy))
     return json_path, md_path
+
+
+def build_crawl_manifest(
+    *,
+    specimen: dict[str, object],
+    ritual: dict[str, object],
+    preset: str,
+    mode: str,
+    command: list[str],
+    output_dir: str,
+    main_url: str,
+    resolved_config: dict[str, object],
+    checkpoint_path: str | None = None,
+    resumed_from: str | None = None,
+    temporal_baseline: str | None = None,
+    stage: str = 'complete',
+    run_metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return a canonical crawl manifest for a run."""
+    return {
+        'manifest_version': 1,
+        'stage': stage,
+        'generated_at': _now_iso(),
+        'target': {
+            'main_url': main_url,
+            'specimen': specimen,
+            'ritual_chain': ritual.get('ritual_chain'),
+            'ritual_label': ritual.get('label'),
+            'preset': preset,
+            'mode': mode,
+        },
+        'resolved_config': resolved_config,
+        'runtime': {
+            'python_version': sys.version,
+            'python_executable': sys.executable,
+            'platform': platform.platform(),
+            'cwd': os.getcwd(),
+            'dependency_versions': _dependency_versions(('requests', 'urllib3', 'tldextract', 'flask', 'playwright')),
+        },
+        'command': list(command or ()),
+        'run_metadata': dict(run_metadata or {}),
+        'lineage': {
+            'checkpoint_path': checkpoint_path or '',
+            'resumed_from': resumed_from or '',
+            'temporal_baseline': temporal_baseline or '',
+            'output_dir': output_dir,
+        },
+        'artifacts': _hash_output_dir(output_dir),
+    }
+
+
+def write_manifest_file(output_dir: str, manifest: dict[str, object]) -> str:
+    """Write crawl manifest JSON to *output_dir*."""
+    path = os.path.join(output_dir, 'crawl-manifest.json')
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(manifest, handle, indent=2, ensure_ascii=False)
+    return path
+
+
+def write_structured_snapshot_file(output_dir: str, snapshot: dict[str, object]) -> str:
+    """Write the structured temporal baseline manifest for later comparisons."""
+    path = os.path.join(output_dir, TEMPORAL_BASELINE_FILE)
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(snapshot, handle, indent=2, ensure_ascii=False)
+    return path
+
+
+def snapshot_exists(snapshot_dir: str, dataset_names: list[str] | tuple[str, ...]) -> bool:
+    """Return whether *snapshot_dir* contains any baseline material."""
+    if not snapshot_dir or not os.path.isdir(snapshot_dir):
+        return False
+    baseline_path = os.path.join(snapshot_dir, TEMPORAL_BASELINE_FILE)
+    if os.path.exists(baseline_path):
+        return True
+    manifest_path = os.path.join(snapshot_dir, 'crawl-manifest.json')
+    autopsy_path = os.path.join(snapshot_dir, 'autopsy.json')
+    if os.path.exists(manifest_path) or os.path.exists(autopsy_path):
+        return True
+    return any(
+        os.path.exists(os.path.join(snapshot_dir, f'{name}.txt'))
+        for name in list(dataset_names) + ['stats']
+    )
+
+
+def load_previous_snapshot(snapshot_dir: str, dataset_names: list[str] | tuple[str, ...]) -> dict[str, object]:
+    """Load a prior structured or text-only snapshot for temporal comparisons."""
+    if not snapshot_exists(snapshot_dir, dataset_names):
+        return {}
+    snapshot: dict[str, object] = {}
+    baseline_path = os.path.join(snapshot_dir, TEMPORAL_BASELINE_FILE)
+    baseline_snapshot = _load_json_file(baseline_path)
+    if isinstance(baseline_snapshot, dict):
+        snapshot.update(baseline_snapshot)
+    for name in list(dataset_names) + ['stats']:
+        path = os.path.join(snapshot_dir, f'{name}.txt')
+        if not os.path.exists(path):
+            continue
+        with open(path, 'r', encoding='utf-8') as handle:
+            lines = [line.rstrip('\n') for line in handle if line.strip()]
+        if name == 'stats':
+            stats_dict = {}
+            for line in lines:
+                key, _, value = line.partition('=')
+                if key:
+                    stats_dict[key] = value
+            snapshot.setdefault(name, stats_dict)
+        else:
+            snapshot.setdefault(name, lines)
+
+    manifest = _load_json_file(os.path.join(snapshot_dir, 'crawl-manifest.json'))
+    if isinstance(manifest, dict):
+        snapshot.setdefault('artifact_hashes', manifest.get('artifacts') or {})
+        snapshot.setdefault('report_metadata', _manifest_report_metadata(manifest))
+
+    autopsy = _load_json_file(os.path.join(snapshot_dir, 'autopsy.json'))
+    if isinstance(autopsy, dict):
+        snapshot.setdefault('artifact_genealogy', _snapshot_genealogy(autopsy.get('artifact_genealogy') or {}))
+        snapshot.setdefault('content_types', _top_content_type_map(autopsy.get('run_summary', {})))
+        snapshot.setdefault('autopsy_summary', _autopsy_summary_for_snapshot(autopsy))
+        if not snapshot.get('report_metadata'):
+            snapshot['report_metadata'] = _report_metadata_from_autopsy(autopsy)
+    return snapshot
+
+
+def build_run_metadata(
+    *,
+    run_id: str,
+    preset: str,
+    mode: str,
+    ritual_chain: str,
+    command: list[str] | tuple[str, ...] | None = None,
+    runtime_config: RuntimeConfig | dict[str, object] | None = None,
+    baseline_source: str | None = None,
+    output_dir: str | None = None,
+    saved_at: str | None = None,
+) -> dict[str, object]:
+    """Return traceable run metadata for autopsy and manifest files."""
+    config = runtime_config if isinstance(runtime_config, RuntimeConfig) else RuntimeConfig.from_mapping(runtime_config)
+    command_list = [str(item) for item in (command or ())]
+    return {
+        'run_id': run_id,
+        'saved_at': saved_at or _now_iso(),
+        'command': command_list,
+        'command_line': ' '.join(command_list),
+        'preset': preset,
+        'mode': mode,
+        'ritual_chain': ritual_chain,
+        'baseline_source': baseline_source or '',
+        'output_dir': output_dir or '',
+        'flags': config.flags(),
+        'config': config.as_dict(),
+        'runtime': {
+            'python_version': sys.version,
+            'python_executable': sys.executable,
+            'platform': platform.platform(),
+            'dependency_versions': _dependency_versions(('requests', 'urllib3', 'tldextract', 'flask', 'playwright')),
+            'git_commit': _git_commit(),
+        },
+    }
+
+
+def build_structured_snapshot(
+    *,
+    dataset_names: list[str] | tuple[str, ...],
+    datasets: dict[str, list[str]],
+    stats: dict[str, object],
+    autopsy: dict[str, object],
+    manifest: dict[str, object],
+    content_types: dict[str, int] | None = None,
+) -> dict[str, object]:
+    """Build the structured temporal baseline manifest used for later diffs."""
+    run_metadata = autopsy.get('run_metadata', {}) if isinstance(autopsy, dict) else {}
+    snapshot = {
+        'snapshot_version': 2,
+        **{name: list(datasets.get(name, [])) for name in dataset_names if name in datasets},
+        'stats': dict(stats or {}),
+        'content_types': {str(name): int(count) for name, count in sorted((content_types or {}).items())},
+        'artifact_genealogy': _snapshot_genealogy(autopsy.get('artifact_genealogy') or {}),
+        'artifact_hashes': manifest.get('artifacts') or {},
+        'report_metadata': {
+            'mode': manifest.get('target', {}).get('mode'),
+            'preset': manifest.get('target', {}).get('preset'),
+            'ritual_chain': manifest.get('target', {}).get('ritual_chain'),
+            'command_line': run_metadata.get('command_line', ''),
+            'baseline_source': run_metadata.get('baseline_source', ''),
+            'flags': dict(run_metadata.get('flags') or {}),
+            'python_version': ((run_metadata.get('runtime') or {}).get('python_version') or ''),
+            'git_commit': ((run_metadata.get('runtime') or {}).get('git_commit') or ''),
+        },
+        'autopsy_summary': _autopsy_summary_for_snapshot(autopsy),
+    }
+    return snapshot
 
 
 def _append_probe(probes: list[dict[str, str]], seen: set[str], probe: str, source: str, reason: str) -> None:
@@ -414,3 +661,138 @@ def _unique(items: list[str]) -> list[str]:
         seen.add(item)
         ordered.append(item)
     return ordered
+
+
+def _dependency_versions(names: tuple[str, ...]) -> dict[str, str]:
+    versions = {}
+    for name in names:
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = 'missing'
+    return versions
+
+
+def _hash_output_dir(output_dir: str) -> dict[str, dict[str, object]]:
+    artifacts: dict[str, dict[str, object]] = {}
+    if not output_dir or not os.path.isdir(output_dir):
+        return artifacts
+    for entry in sorted(os.listdir(output_dir)):
+        if entry in {'crawl-manifest.json', TEMPORAL_BASELINE_FILE}:
+            continue
+        path = os.path.join(output_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        artifacts[entry] = {
+            'sha256': _hash_file(path),
+            'size': os.path.getsize(path),
+        }
+    return artifacts
+
+
+def _hash_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(HASH_CHUNK_SIZE), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_json_file(path: str) -> dict[str, object] | None:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _top_content_type_map(summary: dict[str, object]) -> dict[str, int]:
+    entries = summary.get('top_content_types', []) if isinstance(summary, dict) else []
+    mapping: dict[str, int] = {}
+    for item in entries:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            mapping[str(item[0])] = int(item[1])
+    return mapping
+
+
+def _snapshot_genealogy(genealogy: dict[str, object]) -> dict[str, dict[str, object]]:
+    snapshot: dict[str, dict[str, object]] = {}
+    if not isinstance(genealogy, dict):
+        return snapshot
+    for url, record in genealogy.items():
+        if not isinstance(record, dict):
+            continue
+        snapshot[str(url)] = {
+            'content_type': str(record.get('content_type') or ''),
+            'sha256': str(record.get('sha256') or ''),
+            'size': int(record.get('size') or 0),
+            'archive_presence': bool(record.get('archive_presence')),
+            'first_seen': str(record.get('first_seen') or ''),
+            'last_seen': str(record.get('last_seen') or ''),
+            'title': str(record.get('title') or ''),
+        }
+    return snapshot
+
+
+def _autopsy_summary_for_snapshot(autopsy: dict[str, object]) -> dict[str, object]:
+    summary = autopsy.get('run_summary', {}) if isinstance(autopsy, dict) else {}
+    return {
+        'pages_crawled': int(summary.get('pages_crawled', 0) or 0),
+        'skipped': int(summary.get('skipped', 0) or 0),
+        'failed': int(summary.get('failed', 0) or 0),
+        'exports': [str(item) for item in (summary.get('exports') or [])],
+        'top_content_types': _top_content_type_map(summary),
+    }
+
+
+def _report_metadata_from_autopsy(autopsy: dict[str, object]) -> dict[str, object]:
+    run_metadata = autopsy.get('run_metadata', {}) if isinstance(autopsy, dict) else {}
+    runtime = run_metadata.get('runtime', {}) if isinstance(run_metadata, dict) else {}
+    return {
+        'mode': autopsy.get('what_the_target_is', {}).get('mode'),
+        'preset': autopsy.get('what_the_target_is', {}).get('preset'),
+        'ritual_chain': autopsy.get('what_the_target_is', {}).get('ritual_chain'),
+        'command_line': run_metadata.get('command_line', ''),
+        'baseline_source': run_metadata.get('baseline_source', ''),
+        'flags': dict(run_metadata.get('flags') or {}),
+        'python_version': runtime.get('python_version', ''),
+        'git_commit': runtime.get('git_commit', ''),
+    }
+
+
+def _manifest_report_metadata(manifest: dict[str, object]) -> dict[str, object]:
+    run_metadata = manifest.get('run_metadata', {}) if isinstance(manifest, dict) else {}
+    runtime = run_metadata.get('runtime', {}) if isinstance(run_metadata, dict) else {}
+    return {
+        'mode': manifest.get('target', {}).get('mode'),
+        'preset': manifest.get('target', {}).get('preset'),
+        'ritual_chain': manifest.get('target', {}).get('ritual_chain'),
+        'command_line': run_metadata.get('command_line', ''),
+        'baseline_source': run_metadata.get('baseline_source', ''),
+        'flags': dict(run_metadata.get('flags') or {}),
+        'python_version': runtime.get('python_version', ''),
+        'git_commit': runtime.get('git_commit', ''),
+    }
+
+
+def _git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    return result.stdout.strip() if result.returncode == 0 else ''

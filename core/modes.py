@@ -156,6 +156,7 @@ MODE_DATASET_NAMES = (
     'locations',
     'stories',
     'hidden_paths',
+    'hidden_probe_sources',
     'scam_signals',
     'temporal_diffs',
 )
@@ -218,6 +219,17 @@ JS_ERROR_RE = re.compile(r'(?i)(?:throw\s+new\s+\w+\(|console\.(?:error|warn)\(|
 JS_COMMENT_RE = re.compile(r'(?://[^\n]{5,200}|/\*[\s\S]{5,240}?\*/)')
 JS_VIEW_RE = re.compile(r'(?i)\b(?:template|view|screen|component|page)\b\s*[:=]\s*["\']([^"\']{2,120})["\']')
 JS_ENV_RE = re.compile(r'(?i)\b(?:process\.env\.[A-Z0-9_]+|REACT_APP_[A-Z0-9_]+|NEXT_PUBLIC_[A-Z0-9_]+|VITE_[A-Z0-9_]+)\b')
+META_COORD_KEYS = (
+    'geo.position',
+    'icbm',
+)
+META_LAT_KEYS = ('place:location:latitude', 'og:latitude')
+META_LON_KEYS = ('place:location:longitude', 'og:longitude')
+META_PLACE_KEYS = ('geo.placename', 'place:location:name')
+WEAK_PLACE_STOPWORDS = frozenset({
+    'Breaking News', 'Last Chance', 'Crypto Only', 'Official Store',
+    'Limited Time', 'Selling Fast', 'Trusted Seller',
+})
 
 
 def coerce_mode(value: str | None) -> str:
@@ -375,21 +387,46 @@ def extract_location_records(page_url: str, response: str) -> set[str]:
     """Extract map-ready coordinate and location records."""
     records = set()
     seen = set()
+    meta = dict((key.lower(), value) for key, value in META_RE.findall(response))
     for lat, lon in COORD_RE.findall(response):
-        key = (lat, lon)
+        key = ('text', lat, lon)
         if key in seen:
             continue
         seen.add(key)
-        records.add(f'url={page_url} kind=coordinate label=coordinate lat={lat} lon={lon}')
+        records.add(f'url={page_url} kind=coordinate confidence=exact source=text label=coordinate lat={lat} lon={lon}')
 
-    meta = dict((key.lower(), value) for key, value in META_RE.findall(response))
-    if 'geo.position' in meta and ';' in meta['geo.position']:
-        lat, lon = [part.strip() for part in meta['geo.position'].split(';', 1)]
-        records.add(f'url={page_url} kind=meta label=geo.position lat={lat} lon={lon}')
+    for key in META_COORD_KEYS:
+        lat, lon = _extract_meta_coordinate_pair(meta.get(key, ''))
+        if not lat or not lon:
+            continue
+        pair = (key, lat, lon)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        records.add(f'url={page_url} kind=geotag confidence=high source=meta label={key} lat={lat} lon={lon}')
+
+    meta_lat = _first_meta_value(meta, META_LAT_KEYS)
+    meta_lon = _first_meta_value(meta, META_LON_KEYS)
+    if meta_lat and meta_lon:
+        pair = ('meta-pair', meta_lat, meta_lon)
+        if pair not in seen:
+            seen.add(pair)
+            records.add(
+                f'url={page_url} kind=geotag confidence=high source=meta '
+                f'label={META_LAT_KEYS[0]}+{META_LON_KEYS[0]} lat={meta_lat} lon={meta_lon}'
+            )
+
+    for key in META_PLACE_KEYS:
+        place = meta.get(key, '').strip()
+        if place:
+            records.add(f'url={page_url} kind=place confidence=medium source=meta label={place}')
 
     visible_text = strip_tags(response)
     for place in PLACE_RE.findall(visible_text):
-        records.add(f'url={page_url} kind=place label={place} source=text')
+        cleaned = place.strip()
+        if not _looks_like_place_guess(cleaned):
+            continue
+        records.add(f'url={page_url} kind=place confidence=weak source=text label={cleaned}')
     return records
 
 
@@ -406,16 +443,28 @@ def extract_story_records(page_url: str, response: str) -> set[str]:
     published = meta.get('article:published_time') or (time_match.group(1) if time_match else '')
     language = LANG_RE.search(response)
     site_name = meta.get('og:site_name') or (urlsplit(page_url).netloc or '')
+    page_domain = urlsplit(page_url).netloc or ''
+    cluster = f'{story_id}@{page_domain or "unknown"}'
     references = sorted(set(ABSOLUTE_LINK_RE.findall(response)))
     quotes = QUOTE_RE.findall(strip_tags(response))
+    metadata_fingerprint = f'source={site_name or "-"} published={published or "-"} lang={(language.group(1) if language else "-")}'
     records.add(
-        f'story={story_id} title={title} source={site_name} published={published or "-"} '
-        f'lang={(language.group(1) if language else "-")} url={page_url} refs={len(references)}'
+        f'story={story_id} cluster={cluster} relation=page title={title} source={site_name} '
+        f'published={published or "-"} lang={(language.group(1) if language else "-")} '
+        f'url={page_url} refs={len(references)}'
     )
+    records.add(f'story={story_id} cluster={cluster} relation=metadata {metadata_fingerprint} url={page_url}')
     for reference in references[:10]:
-        records.add(f'story={story_id} reference={reference} url={page_url}')
+        reference_domain = urlsplit(reference).netloc or ''
+        relation = 'reference'
+        if reference_domain and reference_domain != page_domain:
+            relation = 'mirror'
+        records.add(
+            f'story={story_id} cluster={cluster} relation={relation} '
+            f'reference={reference} reference_domain={reference_domain or "-"} url={page_url}'
+        )
     for quote in quotes[:5]:
-        records.add(f'story={story_id} quote={quote} url={page_url}')
+        records.add(f'story={story_id} cluster={cluster} relation=quote quote={quote} url={page_url}')
     return records
 
 
@@ -430,37 +479,114 @@ def extract_scam_signals(page_url: str, response: str) -> set[str]:
     return signals
 
 
-def build_hidden_candidates(main_url: str, internal: set[str], scripts: set[str], endpoints: set[str]) -> list[str]:
-    """Return a bounded list of hidden-path guesses."""
+def build_hidden_candidate_records(
+    main_url: str,
+    internal: set[str],
+    scripts: set[str],
+    endpoints: set[str],
+    extra_words: tuple[str, ...] | list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Return bounded hidden-path candidate records with provenance."""
     parsed = urlsplit(main_url)
     root = f'{parsed.scheme}://{parsed.netloc}/'
-    tokens = set(HIDDEN_WORDLIST)
-    for collection in (internal, scripts):
+    token_sources: dict[str, set[str]] = {}
+    for token in HIDDEN_WORDLIST:
+        token_sources.setdefault(token, set()).add('wordlist:default')
+    for token in extra_words or ():
+        normalized = _normalize_hidden_token(token)
+        if normalized:
+            token_sources.setdefault(normalized, set()).add('wordlist:user')
+    for collection_name, collection in (('internal', internal), ('script', scripts)):
         for item in collection:
-            path = urlsplit(item).path
-            for part in path.split('/'):
-                part = part.strip().strip('.')
-                if re.fullmatch(r'[a-z0-9][a-z0-9._-]{1,24}', part or ''):
-                    tokens.add(part)
+            for token in _tokenize_hidden_source(urlsplit(item).path):
+                token_sources.setdefault(token, set()).add(f'learned:{collection_name}:{item}')
     for endpoint in endpoints:
-        for part in endpoint.split('/'):
-            part = part.strip().strip('.')
-            if re.fullmatch(r'[a-z0-9][a-z0-9._-]{1,24}', part or ''):
-                tokens.add(part)
-    candidates = []
-    for token in sorted(tokens):
-        candidates.append(root + token)
-        candidates.append(root + token + '/')
-    deduped = []
+        for token in _tokenize_hidden_source(endpoint):
+            token_sources.setdefault(token, set()).add(f'learned:endpoint:{endpoint}')
+
+    records = []
     seen = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        deduped.append(candidate)
-        if len(deduped) >= 48:
-            break
-    return deduped
+    for token in sorted(token_sources, key=lambda item: _hidden_token_sort_key(item, token_sources[item])):
+        sources = sorted(token_sources[token])
+        strategy = 'learned' if any(source.startswith('learned:') for source in sources) else 'wordlist'
+        source_label = '|'.join(sources[:4])
+        for suffix in ('', '/'):
+            probe = root + token + suffix
+            if probe in seen:
+                continue
+            seen.add(probe)
+            records.append({
+                'probe': probe,
+                'token': token,
+                'strategy': strategy,
+                'source': source_label,
+            })
+            if len(records) >= 48:
+                return records
+    return records
+
+
+def build_hidden_candidates(
+    main_url: str,
+    internal: set[str],
+    scripts: set[str],
+    endpoints: set[str],
+    extra_words: tuple[str, ...] | list[str] | None = None,
+) -> list[str]:
+    """Return a bounded list of hidden-path guesses."""
+    return [item['probe'] for item in build_hidden_candidate_records(main_url, internal, scripts, endpoints, extra_words=extra_words)]
+
+
+def _extract_meta_coordinate_pair(value: str) -> tuple[str, str]:
+    if not value:
+        return '', ''
+    for separator in (';', ','):
+        if separator in value:
+            lat, lon = [part.strip() for part in value.split(separator, 1)]
+            if lat and lon:
+                return lat, lon
+    return '', ''
+
+
+def _first_meta_value(meta: dict[str, str], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = meta.get(key, '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _looks_like_place_guess(value: str) -> bool:
+    if not value or value in WEAK_PLACE_STOPWORDS:
+        return False
+    parts = value.split()
+    if len(parts) == 1:
+        return len(value) >= 4 and value[0].isupper()
+    return True
+
+
+def _normalize_hidden_token(value: str) -> str:
+    token = (value or '').strip().strip('.').lower()
+    if re.fullmatch(r'[a-z0-9][a-z0-9._-]{1,24}', token or ''):
+        return token
+    return ''
+
+
+def _tokenize_hidden_source(value: str) -> list[str]:
+    tokens = []
+    for part in value.split('/'):
+        token = _normalize_hidden_token(part)
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _hidden_token_sort_key(token: str, sources: set[str]) -> tuple[int, int, str]:
+    if 'wordlist:user' in sources:
+        return (0, 0, token)
+    if any(source.startswith('learned:') for source in sources):
+        return (1, 0, token)
+    return (2, 0, token)
 
 
 def build_temporal_diffs(previous_snapshot: dict[str, object], current_snapshot: dict[str, object]) -> set[str]:
@@ -468,22 +594,53 @@ def build_temporal_diffs(previous_snapshot: dict[str, object], current_snapshot:
     diffs = set()
     dataset_names = set(previous_snapshot) | set(current_snapshot)
     for name in sorted(dataset_names):
-        previous = previous_snapshot.get(name)
-        current = current_snapshot.get(name)
-        if any(isinstance(value, dict) for value in (previous, current)):
-            previous = previous or {}
-            current = current or {}
-            keys = set(previous) | set(current)
-            for key in sorted(keys):
-                prev_value = previous.get(key)
-                curr_value = current.get(key)
-                if prev_value != curr_value:
-                    diffs.add(f'dataset={name} metric={key} before={prev_value} after={curr_value}')
-            continue
-        previous_values = set(previous or [])
-        current_values = set(current or [])
-        for item in sorted(current_values - previous_values):
-            diffs.add(f'dataset={name} change=added value={item}')
-        for item in sorted(previous_values - current_values):
-            diffs.add(f'dataset={name} change=removed value={item}')
+        diffs.update(_build_temporal_diff_records([name], previous_snapshot.get(name), current_snapshot.get(name)))
     return diffs
+
+
+def _build_temporal_diff_records(path: list[str], previous: object, current: object) -> set[str]:
+    if isinstance(previous, dict) or isinstance(current, dict):
+        previous_map = previous if isinstance(previous, dict) else {}
+        current_map = current if isinstance(current, dict) else {}
+        diffs = set()
+        for key in sorted(set(previous_map) | set(current_map)):
+            diffs.update(_build_temporal_diff_records(path + [str(key)], previous_map.get(key), current_map.get(key)))
+        return diffs
+    if _is_temporal_sequence(previous) or _is_temporal_sequence(current):
+        previous_values = set(_normalize_temporal_sequence(previous))
+        current_values = set(_normalize_temporal_sequence(current))
+        diffs = set()
+        for item in sorted(current_values - previous_values):
+            diffs.add(_format_temporal_list_diff(path, 'added', item))
+        for item in sorted(previous_values - current_values):
+            diffs.add(_format_temporal_list_diff(path, 'removed', item))
+        return diffs
+    if previous == current:
+        return set()
+    return {_format_temporal_scalar_diff(path, previous, current)}
+
+
+def _is_temporal_sequence(value: object) -> bool:
+    return isinstance(value, (list, tuple, set))
+
+
+def _normalize_temporal_sequence(value: object) -> list[str]:
+    if not _is_temporal_sequence(value):
+        return []
+    return [str(item) for item in value if item is not None]
+
+
+def _format_temporal_list_diff(path: list[str], change: str, value: str) -> str:
+    dataset = path[0]
+    if len(path) == 1:
+        return f'dataset={dataset} change={change} value={value}'
+    return f'dataset={dataset} item={" / ".join(path[1:])} change={change} value={value}'
+
+
+def _format_temporal_scalar_diff(path: list[str], previous: object, current: object) -> str:
+    dataset = path[0]
+    if len(path) == 1:
+        return f'dataset={dataset} metric=value before={previous} after={current}'
+    if len(path) == 2:
+        return f'dataset={dataset} metric={path[1]} before={previous} after={current}'
+    return f'dataset={dataset} item={" / ".join(path[1:-1])} field={path[-1]} before={previous} after={current}'
